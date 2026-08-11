@@ -3,8 +3,8 @@
 This document specifies exactly how the inspector derives velocity, heading,
 acceleration, and curvature from raw `(lat, lon, time)` GPS fixes, and the
 run-detection logic built on top of them. It reflects the current state of
-`gps_track_inspector.html` — a single self-contained HTML/JS file, no
-dependencies, fully offline.
+`wtrack.html` — a single self-contained HTML/JS file, no dependencies,
+fully offline.
 
 **What's here:** coordinate projection, sampling-interval detection
 (including variable-rate devices), kinematics (velocity, acceleration,
@@ -1322,3 +1322,4 @@ is.
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
