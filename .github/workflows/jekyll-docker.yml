@@ -14,7 +14,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Copy wsurf.html to index.html so it serves at the site root
-      run: cp wsurf.html index.html
+      run: cp wtrack.html index.html
     - name: Build the site in the jekyll/builder container
       run: |
         docker run \
