@@ -1,0 +1,3542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Windsurfing Track Inspector</title>
+<style>
+  :root{
+    --bg: #0f1216;
+    --panel: #161a20;
+    --panel2: #1d222a;
+    --line: #2a3038;
+    --text: #d7dde3;
+    --dim: #7c8794;
+    --accent: #4fb3ff;
+    --good: #3ecf8e;
+    --warn: #ffb454;
+    --bad: #ff5d5d;
+    --mono: "SF Mono", "Consolas", "Menlo", monospace;
+  }
+  *{box-sizing:border-box;}
+  html{ overscroll-behavior:none; }
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family: var(--mono);
+    font-size:13px;
+    overscroll-behavior:none; /* disable pull-to-refresh and scroll-chaining bounce, which fights with in-canvas drag/pan gestures */
+  }
+  header{
+    padding:14px 18px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:18px; flex-wrap:wrap;
+  }
+  header h1{font-size:15px; margin:0; font-weight:600; letter-spacing:.02em; color:#fff;}
+  #fileInput{ color: var(--dim); }
+  .stats{ display:flex; gap:16px; flex-wrap:wrap; margin-left:auto; font-size:12px; color:var(--dim);}
+  .stats b{color:var(--text); font-weight:600;}
+  .layout{
+    display:flex;
+    flex-direction:column;
+    gap:14px; padding:14px;
+  }
+  .panel{
+    background:var(--panel); border:1px solid var(--line); border-radius:6px;
+    padding:10px 12px;
+  }
+  .panel h2{
+    font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+    margin:0 0 8px 0; font-weight:600;
+  }
+  .panel-header{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+  .panel-header h2{ margin:0; }
+  canvas{ display:block; width:100%; height:auto; cursor:crosshair; border-radius:4px;}
+  #mapCanvas, #kinematicCanvas{
+    touch-action:none; /* these have custom drag-to-pan / wheel-to-zoom — let JS handle touches instead of the browser's default scroll/zoom */
+  }
+  .charts{ display:flex; flex-direction:column; gap:10px; }
+  .controls{
+    display:flex; flex-direction:column; gap:10px;
+  }
+  .row{ display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  .navbar{
+    position:fixed; left:0; right:0; bottom:0; z-index:100;
+    display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    background:var(--panel); border-top:1px solid var(--line);
+    padding:10px 14px; box-shadow:0 -2px 10px rgba(0,0,0,0.3);
+  }
+  .navbar input[type=range]{ flex:1; min-width:80px; }
+  .navbar button{
+    padding:9px 14px; white-space:nowrap; /* slightly larger than default — easier to tap on mobile */
+    -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; touch-action:manipulation;
+  }
+  #navbarSpacer{ height:0; } /* set dynamically once the navbar becomes visible — see syncNavbarSpacer */
+  input[type=range]{ flex:1; accent-color: var(--accent); }
+  button{
+    background:var(--panel2); color:var(--text); border:1px solid var(--line);
+    border-radius:4px; padding:6px 12px; font-family:var(--mono); font-size:12px; cursor:pointer;
+  }
+  button:hover{ border-color:var(--accent); color:#fff; }
+  button:disabled{ opacity:.4; cursor:default; }
+  .thresh{ display:flex; gap:8px; align-items:center; color:var(--dim); }
+  .thresh input{
+    width:60px; background:var(--panel2); border:1px solid var(--line); color:var(--text);
+    border-radius:4px; padding:4px 6px; font-family:var(--mono); font-size:12px;
+  }
+  .info-grid{
+    display:grid; grid-template-columns: repeat(auto-fill, minmax(130px,1fr));
+    gap:8px 16px; font-size:12px;
+  }
+  .info-grid div span.k{ color:var(--dim); display:block; font-size:10px; text-transform:uppercase; letter-spacing:.05em;}
+  .info-grid div span.v{ font-size:14px; }
+  .legend{ display:flex; gap:14px; font-size:11px; color:var(--dim); margin-top:4px; flex-wrap:wrap;}
+  .legend .sw{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px;}
+  #dropHint{
+    padding:60px 20px; text-align:center; color:var(--dim); border:1px dashed var(--line);
+    border-radius:6px; margin:14px;
+  }
+  #dropHint.dragover{ border-color:var(--accent); color:var(--accent); }
+  a{color:var(--accent);}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Windsurfing Track Inspector</h1>
+  <input type="file" id="fileInput" accept=".gpx,.xml">
+  <div class="stats" id="statsBar"></div>
+</header>
+
+<div id="dropHint">Drop a .gpx file here, or use the file picker above.</div>
+
+<div class="layout" id="mainLayout" style="display:none;">
+
+  <div class="panel">
+    <div class="panel-header">
+      <h2>Wind estimate</h2>
+      <button id="windRoseToggleBtn" type="button">show details</button>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+      <label for="windDirManual" style="font-size:13px;">wind direction (&deg;):</label>
+      <input type="number" id="windDirManual" step="1" style="width:70px;">
+      <button id="windDirResetBtn" type="button">recalculate</button>
+      <button id="windDirFlipBtn" type="button">flip 180&deg;</button>
+    </div>
+    <div id="windUndeterminedMsg" style="color:var(--bad); font-size:12px; margin-bottom:8px;"></div>
+    <div id="windRoseContainer" style="display:none;">
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+        <label for="tackSplitManual" style="font-size:13px;">tack split (&deg;):</label>
+        <input type="number" id="tackSplitManual" step="1" style="width:70px;">
+        <button id="tackSplitResetBtn" type="button">recalculate</button>
+      </div>
+      <div class="legend" style="margin-bottom:10px;">
+        <span><span class="sw" style="background:rgba(79,179,255,0.55)"></span>distance by heading</span>
+        <span><span class="sw" style="background:#8c96a0"></span>tack split</span>
+        <span><span class="sw" style="background:#e0c34f"></span>tack medians</span>
+        <span><span class="sw" style="background:#3ecf8e"></span>tack top-speed</span>
+        <span><span class="sw" style="background:#c77dff"></span>wind axis</span>
+        <span><span class="sw" style="background:#ff5d5d"></span>wind in use</span>
+      </div>
+      <canvas id="windRoseCanvas" width="480" height="480" style="width:100%; max-width:37em;"></canvas>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <h2>Track (X–Y, metres, local ENU)</h2>
+      <div style="display:flex; gap:8px;">
+        <button id="trackLegendToggleBtn" type="button">show legend</button>
+        <button id="miniRoseModeBtn" type="button">compass: corner</button>
+        <button id="osmToggleBtn" type="button">show map background</button>
+        <button id="edgeColorToggleBtn" type="button">color: by type</button>
+      </div>
+    </div>
+    <div id="trackLegendContainer" style="display:none;">
+      <div class="legend" id="trackLegend">
+        <span><span class="sw" style="background:#3a4552"></span>track path</span>
+        <span><span class="sw" style="background:#3ecf8e"></span>run edge</span>
+        <span><span class="sw" style="background:#e0c34f; border-radius:50%;"></span>run breakpoint (start/end — can be shared between runs)</span>
+        <span><span class="sw" style="background:#c77dff"></span>classified jibe</span>
+        <span><span class="sw" style="background:#ff9d4d"></span>failed jibe attempt</span>
+        <span><span class="sw" style="background:#2dd4bf"></span>classified tack</span>
+        <span><span class="sw" style="background:#ff5d9e"></span>failed tack attempt</span>
+        <span><span class="sw" style="background:#8a5a5a"></span>crash / recovery (gap-triggered)</span>
+      </div>
+    </div>
+    <div style="position:relative;">
+      <canvas id="mapCanvas" width="620" height="560" style="max-height:37em;"></canvas>
+      <div id="miniRoseWrapper" style="position:absolute; top:8px; left:8px; pointer-events:none;">
+        <canvas id="miniRoseCanvas" width="90" height="90" style="width:90px; height:90px; touch-action:auto; cursor:default;"></canvas>
+        <div id="miniRoseReadout" style="background:rgba(15,18,22,0.7); border-radius:4px; padding:3px 6px; margin-top:4px; font-size:10px; color:#d7dde3; text-align:center; white-space:nowrap;"></div>
+      </div>
+      <a id="osmAttribution" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener"
+         style="display:none; position:absolute; bottom:4px; right:6px; background:rgba(15,18,22,0.7); border-radius:3px; padding:2px 6px; font-size:10px; color:#8a95a1; text-decoration:none;">
+        &copy; OpenStreetMap contributors
+      </a>
+      <div id="selectionInfoBox" style="position:absolute; top:130px; left:8px; min-width:150px; background:rgba(15,18,22,0.8); border-radius:4px; padding:6px 9px; font-size:11px; line-height:1.5; color:#d7dde3; pointer-events:none;"></div>
+    </div>
+  </div>
+
+  <div class="charts">
+    <div class="panel">
+      <div class="panel-header">
+        <h2>Kinematics</h2>
+        <button id="kinematicLegendToggleBtn" type="button">show legend</button>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+        <label for="kinematicSelect" style="font-size:13px;">plot:</label>
+        <select id="kinematicSelect">
+          <option value="speed">speed</option>
+          <option value="tanAccel">tangential acceleration</option>
+          <option value="centripetalAccel">centripetal acceleration</option>
+          <option value="headingUnwrapped">heading</option>
+          <option value="curvature">curvature</option>
+        </select>
+        <span id="kinematicUnitLabel" style="font-size:12px; color:var(--dim);"></span>
+      </div>
+      <div id="kinematicLegendContainer" style="display:none;">
+        <div class="legend" id="kinematicLegend" style="margin-bottom:8px;"></div>
+      </div>
+      <canvas id="kinematicCanvas" width="900" height="150"></canvas>
+    </div>
+  </div>
+
+  <div class="controls panel">
+    <div class="row">
+      <button id="restoreBtn">restore original track</button>
+      <button id="saveAsBtn" style="border-color:var(--good); color:var(--good);">save as GPX&hellip;</button>
+      <button id="dedupeBtn" style="border-color:var(--warn); color:var(--warn);">remove duplicate-coord points</button>
+      <label style="font-size:13px;">speed unit: <select id="speedUnitSelect">
+        <option value="ms">m/s</option>
+        <option value="kmh">km/h</option>
+        <option value="kt">knots</option>
+      </select></label>
+      <span style="color:var(--dim); font-size:11px;">scroll to zoom &middot; drag to pan (time charts stay in sync)</span>
+    </div>
+    <div class="row thresh">
+      <label style="color:var(--good);">run detection:</label>
+      <label>run breaks if |curvature| &ge; <input type="number" id="runCurvThresh" value="1" step="0.01" min="0"> /m</label>
+      <label>or heading deviates &ge; <input type="number" id="runBreakHeadingThresh" value="90" step="1" min="0"> &deg; (wide angle) from run start</label>
+      <label>or speed &le; <input type="number" id="runLowSpeedThresh" value="0.3" step="0.1" min="0"> m/s</label>
+      <label>or derived&minus;device speed &ge; <input type="number" id="runDeviceDisagreeThresh" value="5" step="0.5" min="0"> m/s (if device speed present)</label>
+      <label>warm-up validated at &ge; <input type="number" id="runNarrowHeadingThresh" value="10" step="1" min="0"> &deg; (narrow angle)</label>
+      <label>trailing straightness sample <input type="number" id="runTailSampleEdges" value="5" step="1" min="1"> edges (narrow angle)</label>
+      <label>reconnect walk-back breaks if lead-in/out differ &lt; <input type="number" id="reconnectAngle" value="30" step="1" min="0"> &deg;</label>
+      <label>loose tack success: under <input type="number" id="looseTackMaxDuration" value="20" step="1" min="0"> s, &le; <input type="number" id="looseTackMaxStallTime" value="5" step="0.5" min="0"> s total below low-speed threshold</label>
+      <label>warm-up length <input type="number" id="runMinSec" value="5" step="1" min="0"> s</label>
+      <label>min run duration <input type="number" id="runMinDuration" value="12" step="1" min="0"> s</label>
+    </div>
+    <div class="info-grid" id="infoGrid"></div>
+  </div>
+
+  <div id="navbarSpacer"></div>
+
+</div>
+
+<div class="navbar" id="navBar" style="display:none;">
+  <button id="prevBtn">&larr; prev</button>
+  <input type="range" id="slider" min="0" max="0" value="0">
+  <button id="nextBtn">next &rarr;</button>
+  <button id="resetViewBtn">reset zoom/pan</button>
+</div>
+
+<script>
+(function(){
+
+  // ---------- state ----------
+  let points = [];     // {lat, lon, ele, time(Date), t(sec), x, y, rawSpeed(optional)}
+  let derived = [];    // same length as points; null for endpoints; else {speed, ax, ay, accelMag, tanAccel, heading, headingUnwrapped}
+  let selected = 0;
+  let firstValid = 0, lastValid = 0;
+
+  // pan/zoom state
+  let mapZoom = { scale: 1, panX: 0, panY: 0 };     // scale is a multiplier on top of the auto-fit scale
+  let timeView = null;                              // {tMin, tMax} shared across all time-series charts
+  let fullTRange = null;                             // {tMin, tMax} full data extent, for clamping
+  let lastLoadedText = null;                          // raw GPX text, cached so we can restore after deleting points
+  let lastLoadedFilename = null;                       // source filename, used to derive the export filename
+  let baseDtMs = null;                                 // detected sampling interval (ms), min dt across the originally loaded track
+  let dtMaxVar = null;                                  // highest dt (ms) still common enough (>=10% of intervals) to be normal variable-rate sampling, not a true gap
+
+  const el = id => document.getElementById(id);
+  const fileInput = el('fileInput');
+  const dropHint = el('dropHint');
+  const mainLayout = el('mainLayout');
+  const navBar = el('navBar');
+  const statsBar = el('statsBar');
+  const slider = el('slider');
+  const infoGrid = el('infoGrid');
+  const mapCanvas = el('mapCanvas');
+  const miniRoseCanvas = el('miniRoseCanvas');
+  const miniRoseWrapper = el('miniRoseWrapper');
+  const miniRoseReadout = el('miniRoseReadout');
+  const selectionInfoBox = el('selectionInfoBox');
+  const miniRoseModeBtn = el('miniRoseModeBtn');
+  let miniRoseMode = 'corner'; // 'corner' | 'follow' — follow sticks the compass to the selected point's screen position, through pan/zoom too, useful for comparing local heading against the wind right where you're looking
+  miniRoseModeBtn.addEventListener('click', ()=>{
+    miniRoseMode = miniRoseMode === 'corner' ? 'follow' : 'corner';
+    miniRoseModeBtn.textContent = 'compass: ' + miniRoseMode;
+    updateSelectionInfoBoxPosition();
+    drawMiniRose();
+  });
+  // The selection info box sits below the compass when it's docked in its
+  // default corner position — but in 'follow' mode the compass moves away
+  // to track the selected point instead, leaving that corner empty, so
+  // the info box reflows up to occupy it rather than leaving a gap.
+  function updateSelectionInfoBoxPosition(){
+    selectionInfoBox.style.top = miniRoseMode === 'corner' ? '130px' : '8px';
+  }
+  updateSelectionInfoBoxPosition();
+  const osmToggleBtn = el('osmToggleBtn');
+  const osmAttribution = el('osmAttribution');
+  let showMapBackground = false; // off by default — this is the one feature here that needs network access, so it stays opt-in rather than compromising the rest of the tool's offline-first design
+  osmToggleBtn.addEventListener('click', ()=>{
+    showMapBackground = !showMapBackground;
+    osmToggleBtn.textContent = showMapBackground ? 'hide map background' : 'show map background';
+    osmAttribution.style.display = showMapBackground ? '' : 'none';
+    drawMap();
+  });
+  const edgeColorToggleBtn = el('edgeColorToggleBtn');
+  let edgeColorMode = 'type'; // 'type' | 'speed'
+
+  // Global speed display unit — affects every displayed speed READOUT
+  // (charts, info grid, legends, readouts) but deliberately not the
+  // low-speed/device-disagreement THRESHOLD inputs in the controls panel:
+  // those are tuning parameters with a specific internal meaning tied to
+  // the algorithm, in m/s, and converting their displayed unit without
+  // also rescaling the underlying threshold value would be misleading —
+  // out of scope for what "display" means here.
+  const SPEED_UNIT_FACTORS = { ms: 1, kmh: 3.6, kt: 1.9438444924406 };
+  const SPEED_UNIT_LABELS = { ms: 'm/s', kmh: 'km/h', kt: 'kn' };
+  let speedUnit = 'ms';
+  function dispSpeed(v){ return v * SPEED_UNIT_FACTORS[speedUnit]; }
+  function formatSpeed(v, decimals){
+    if(v == null) return null;
+    return dispSpeed(v).toFixed(decimals==null?1:decimals) + ' ' + SPEED_UNIT_LABELS[speedUnit];
+  }
+  let currentSpeedGradientRange = {min:0, max:1}; // set by drawMap whenever edgeColorMode is 'speed', read by updateTrackLegend
+  const trackLegend = el('trackLegend');
+  const speedUnitSelect = el('speedUnitSelect');
+  speedUnitSelect.addEventListener('change', ()=>{
+    speedUnit = speedUnitSelect.value;
+    redrawAll();
+  });
+  edgeColorToggleBtn.addEventListener('click', ()=>{
+    edgeColorMode = edgeColorMode === 'type' ? 'speed' : 'type';
+    edgeColorToggleBtn.textContent = 'color: by ' + edgeColorMode;
+    drawMap();
+  });
+  const kinematicCanvas = el('kinematicCanvas');
+  const kinematicSelect = el('kinematicSelect');
+  const windRoseCanvas = el('windRoseCanvas');
+  const windUndeterminedMsg = el('windUndeterminedMsg');
+  const windDirManualInput = el('windDirManual');
+  const windDirResetBtn = el('windDirResetBtn');
+  const windDirFlipBtn = el('windDirFlipBtn');
+  const tackSplitManualInput = el('tackSplitManual');
+  const tackSplitResetBtn = el('tackSplitResetBtn');
+  const windRoseToggleBtn = el('windRoseToggleBtn');
+  const windRoseContainer = el('windRoseContainer');
+  const trackLegendToggleBtn = el('trackLegendToggleBtn');
+  const trackLegendContainer = el('trackLegendContainer');
+
+  // The manual textbox is the single source of truth for "effective" wind
+  // direction, used everywhere a wind direction is needed (transitions,
+  // rose diagram markers, headline text, the transition-distance
+  // indicator). It's auto-initialized from the calculated estimate on
+  // each fresh file load, but from then on reflects whatever the user has
+  // typed — including blank, which means "no wind direction" exactly like
+  // an undetermined calculated estimate would.
+  function getManualWindDirection(){
+    const v = parseFloat(windDirManualInput.value);
+    if(!Number.isFinite(v)) return null;
+    return ((v % 360) + 360) % 360;
+  }
+
+  function getManualTackSplit(){
+    const v = parseFloat(tackSplitManualInput.value);
+    if(!Number.isFinite(v)) return null;
+    return ((v % 360) + 360) % 360;
+  }
+
+  // Sets the textbox from the most recently computed estimate — the
+  // calculated value if one was found, blank if undetermined. Does NOT
+  // redraw itself; callers redraw afterward once they're done touching
+  // the textbox.
+  //
+  // If a tack-split override is currently active, recompute wind
+  // direction from THAT split's own buckets instead of falling back to
+  // the fully-automatic est.windDirection — otherwise "recalculate" would
+  // silently discard the user's split override and revert to a wind
+  // direction that doesn't match what's actually being shown.
+  function resetWindDirToCalculated(){
+    if(currentOverrideBuckets && currentOverrideBuckets.bucketA && currentOverrideBuckets.bucketB){
+      const dirResult = computeWindDirectionFromBuckets(currentOverrideBuckets.bucketA, currentOverrideBuckets.bucketB);
+      windDirManualInput.value = dirResult ? Math.round(dirResult.windDirection) : '';
+      return;
+    }
+    const est = currentWindEstimate;
+    windDirManualInput.value = (est && est.ok) ? Math.round(est.windDirection) : '';
+  }
+
+  // Same idea, but checks splitAxis directly rather than est.ok — the
+  // split axis can come back validly computed even when the overall
+  // pipeline didn't fully succeed (e.g. the skewness check failed, or a
+  // bucket ended up empty, or the bisector was degenerate) — all of those
+  // failure paths still carry a real splitAxis value forward, and it's
+  // worth being able to reset to it specifically rather than only when
+  // absolutely everything succeeded.
+  function resetTackSplitToCalculated(){
+    const est = currentWindEstimate;
+    tackSplitManualInput.value = (est && est.splitAxis != null) ? Math.round(est.splitAxis) : '';
+  }
+
+  windDirResetBtn.addEventListener('click', ()=>{
+    resetWindDirToCalculated();
+    redrawAll();
+  });
+  windDirFlipBtn.addEventListener('click', ()=>{
+    const cur = getManualWindDirection();
+    if(cur == null) return; // nothing to flip when blank
+    windDirManualInput.value = Math.round((cur + 180) % 360);
+    redrawAll();
+  });
+  windDirManualInput.addEventListener('input', ()=>{ redrawAll(); });
+
+  tackSplitResetBtn.addEventListener('click', ()=>{
+    resetTackSplitToCalculated();
+    redrawAll();
+  });
+  tackSplitManualInput.addEventListener('input', ()=>{ redrawAll(); });
+
+  // Wrap a degree input's value back into [0, 360) rather than clamping
+  // it at the boundary — a compass direction is circular, so the spinner
+  // (or arrow keys) incrementing past 359 should roll over to 0, and
+  // decrementing past 0 should roll over to 359, not just get stuck.
+  // Deliberately on 'change', not 'input': change fires immediately for a
+  // spinner click or arrow key (a genuinely committed step, exactly when
+  // wrapping is wanted) but only once typing is finished (blur/enter),
+  // not on every individual keystroke — wrapping mid-typing would fight
+  // the user actively entering a number.
+  function setupWrappingDegreeInput(input){
+    input.addEventListener('change', ()=>{
+      const v = parseFloat(input.value);
+      if(!Number.isFinite(v)) return;
+      const wrapped = ((v % 360) + 360) % 360;
+      if(wrapped !== v) input.value = wrapped;
+      redrawAll();
+    });
+  }
+  setupWrappingDegreeInput(windDirManualInput);
+  setupWrappingDegreeInput(tackSplitManualInput);
+
+  // Reusable show/hide toggle: a button whose label alternates between
+  // "show X" / "hide X", controlling a container's visibility. Used for
+  // both the wind rose+legend and the track legend, so the two behave
+  // identically rather than each having their own separate logic.
+  function setupToggle(btn, container, label){
+    btn.addEventListener('click', ()=>{
+      const showing = container.style.display !== 'none';
+      container.style.display = showing ? 'none' : 'block';
+      btn.textContent = (showing ? 'show ' : 'hide ') + label;
+    });
+  }
+  setupToggle(windRoseToggleBtn, windRoseContainer, 'details');
+  setupToggle(trackLegendToggleBtn, trackLegendContainer, 'legend');
+  const runCurvThreshInput = el('runCurvThresh');
+  const runBreakHeadingThreshInput = el('runBreakHeadingThresh');
+  const runNarrowHeadingThreshInput = el('runNarrowHeadingThresh');
+  const runTailSampleEdgesInput = el('runTailSampleEdges');
+  const reconnectAngleInput = el('reconnectAngle');
+  const looseTackMaxDurationInput = el('looseTackMaxDuration');
+  const looseTackMaxStallTimeInput = el('looseTackMaxStallTime');
+
+  // Wind-estimation tuning constants. These were UI-exposed during
+  // development while actively iterating on the algorithm; now settled,
+  // moved to plain constants to declutter the controls panel. Still just
+  // as easy to tweak here if needed later.
+  const WIND_EST_TOP_SPEED_COUNT = 2;       // fastest edges averaged per bucket for its top-speed vector
+  const WIND_EST_MIN_BUCKET_RATIO = 0.4;    // smaller bucket's distance as a fraction of the larger, below which the split is too skewed to trust
+  const WIND_INDICATOR_MIN_SAMPLES = 1;     // min transitions needed in each direction for the transition-distance indicator
+  const WIND_INDICATOR_MIN_DIFF = 2;        // min average-distance gap (m) between the two directions
+  const WIND_INDICATOR_MAX_DURATION = 60;   // ignore transitions over this many seconds (likely a recording pause)
+  const WIND_OVERRIDE_WEAK_SPEED_THRESH = 15; // both buckets' fast-vs-median deviation must be under this (deg) to trigger the transition-distance override
+
+  const runMinSecInput = el('runMinSec');
+  const runMinDurationInput = el('runMinDuration');
+  const runLowSpeedThreshInput = el('runLowSpeedThresh');
+  const runDeviceDisagreeThreshInput = el('runDeviceDisagreeThresh');
+  let hasDeviceSpeed = false;
+  let currentRuns = []; // [{startIdx, endIdx, startT, endT, duration}, ...]
+  let currentWindEstimate = null;
+  let currentOverrideBuckets = null; // non-null only when the manual tack split meaningfully differs from (or stands in for) the calculated one — see redrawAll
+  let currentTransitions = [];
+
+  // ---------- file loading ----------
+  fileInput.addEventListener('change', e=>{
+    if(e.target.files[0]) loadFile(e.target.files[0]);
+  });
+  ['dragenter','dragover'].forEach(ev=>{
+    dropHint.addEventListener(ev, e=>{ e.preventDefault(); dropHint.classList.add('dragover'); });
+  });
+  ['dragleave','drop'].forEach(ev=>{
+    dropHint.addEventListener(ev, e=>{ e.preventDefault(); dropHint.classList.remove('dragover'); });
+  });
+  dropHint.addEventListener('drop', e=>{
+    if(e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+  });
+
+  function loadFromText(text, autoDedupe){
+    try{
+      parseGPX(text);
+      project();
+      dedupeTimestamps();
+      if(points.length < 3) throw new Error('Need at least 3 points with distinct timestamps');
+      computeDerived();
+      selected = firstValid;
+      fullTRange = { tMin: points[firstValid].t, tMax: points[lastValid].t };
+      timeView = { tMin: fullTRange.tMin, tMax: fullTRange.tMax };
+      mapZoom = { scale: 1, panX: 0, panY: 0 };
+      buildUI();
+      redrawAll();
+      mainLayout.style.display = 'flex';
+      navBar.style.display = 'flex';
+      syncNavbarSpacer();
+      dropHint.style.display = 'none';
+      if(autoDedupe) removeDuplicateCoordPoints(true); // silent — no alert, just cleans up
+      // Initialize the manual wind direction and tack split textboxes for
+      // this newly-loaded track — from the calculated estimate if one was
+      // found, blank if undetermined — then redraw once more so
+      // transitions and the rose diagram immediately reflect them (the
+      // two redraws above ran before the textboxes had any value, so
+      // transitions weren't classified yet).
+      resetWindDirToCalculated();
+      resetTackSplitToCalculated();
+      redrawAll();
+    }catch(err){
+      alert('Failed to parse GPX: ' + err.message);
+      console.error(err);
+    }
+  }
+
+  function loadFile(file){
+    const reader = new FileReader();
+    reader.onload = ev => {
+      lastLoadedText = ev.target.result;
+      lastLoadedFilename = file.name || null;
+      loadFromText(lastLoadedText, true); // auto-dedupe on a fresh load
+    };
+    reader.readAsText(file);
+  }
+
+  // ---------- GPX parsing ----------
+  function parseGPX(text){
+    const xml = new DOMParser().parseFromString(text, 'application/xml');
+    const perr = xml.getElementsByTagName('parsererror');
+    if(perr.length) throw new Error('XML parse error');
+
+    const trkpts = xml.getElementsByTagNameNS('*','trkpt');
+    if(!trkpts.length) throw new Error('No <trkpt> elements found');
+
+    const pts = [];
+    for(let i=0;i<trkpts.length;i++){
+      const pt = trkpts[i];
+      const lat = parseFloat(pt.getAttribute('lat'));
+      const lon = parseFloat(pt.getAttribute('lon'));
+      if(Number.isNaN(lat) || Number.isNaN(lon)) continue;
+
+      const timeEl = pt.getElementsByTagNameNS('*','time')[0];
+      if(!timeEl) continue; // need time to derive kinematics
+      const time = new Date(timeEl.textContent.trim());
+      if(isNaN(time.getTime())) continue;
+
+      const eleEl = pt.getElementsByTagNameNS('*','ele')[0];
+      const ele = eleEl ? parseFloat(eleEl.textContent) : null;
+
+      const speedEl = pt.getElementsByTagNameNS('*','speed')[0];
+      const rawSpeed = speedEl ? parseFloat(speedEl.textContent) : null;
+
+      pts.push({lat, lon, ele, time, rawSpeed});
+    }
+    if(pts.length < 3) throw new Error('Need at least 3 valid points with time');
+
+    pts.sort((a,b)=> a.time - b.time);
+    const t0 = pts[0].time.getTime();
+    pts.forEach(p => p.t = (p.time.getTime() - t0) / 1000);
+
+    // Detect the device's sampling interval: min positive gap between consecutive
+    // raw timestamps, in ms. Computed once here from the untouched load — later
+    // point deletions only ever widen gaps, so re-deriving after deletion would
+    // just erode the reference rate rather than reflect the device's true cadence.
+    let minDt = Infinity;
+    const allDts = [];
+    for(let i=1;i<pts.length;i++){
+      const dt = pts[i].time.getTime() - pts[i-1].time.getTime();
+      if(dt > 0){
+        if(dt < minDt) minDt = dt;
+        allDts.push(dt);
+      }
+    }
+    baseDtMs = Number.isFinite(minDt) ? minDt : null;
+
+    // For variable-dt devices (adaptive/smart recording), min dt alone can't
+    // tell "this device legitimately logs at several different rates" apart
+    // from "this gap is a genuine dropout." Percentile-based, not a mode:
+    // the 95th percentile of all positive dt values is the upper edge of
+    // what this device's normal variable sampling looks like, and it works
+    // regardless of how the distribution is shaped — a highly variable
+    // device that never has any single dt value common enough to form a
+    // clear mode (the earlier "must appear in >=10% of intervals" approach)
+    // could leave dtMaxVar stuck at baseDtMs and end up flagging most of
+    // the track as gaps. A percentile doesn't need any value to repeat at
+    // all; it just needs the distribution's shape.
+    dtMaxVar = baseDtMs;
+    if(allDts.length > 0){
+      allDts.sort((a,b)=>a-b);
+      const idx = Math.min(allDts.length-1, Math.floor(allDts.length*0.95));
+      dtMaxVar = allDts[idx];
+    }
+
+    points = pts;
+  }
+
+  // ---------- local ENU projection ----------
+  // Vincenty's inverse formula on the WGS84 ellipsoid: exact geodesic
+  // distance and initial bearing (from north, clockwise, radians) between
+  // two lat/lon points (degrees). Converges in a handful of iterations
+  // for any two points that aren't nearly antipodal — never a concern
+  // here, since every point in a single-session track sits close to the
+  // others by construction.
+  function vincentyInverse(lat1Deg, lon1Deg, lat2Deg, lon2Deg){
+    const a = 6378137.0, f = 1/298.257223563, b = a*(1-f);
+    const lat1 = lat1Deg*Math.PI/180, lat2 = lat2Deg*Math.PI/180;
+    const L = (lon2Deg-lon1Deg)*Math.PI/180;
+    const U1 = Math.atan((1-f)*Math.tan(lat1));
+    const U2 = Math.atan((1-f)*Math.tan(lat2));
+    const sinU1=Math.sin(U1), cosU1=Math.cos(U1);
+    const sinU2=Math.sin(U2), cosU2=Math.cos(U2);
+    let lambda = L, lambdaPrev, iterLimit = 100;
+    let sinSigma, cosSigma, sigma, sinAlpha, cosSqAlpha, cos2SigmaM;
+    if(L === 0 && lat1Deg === lat2Deg) return { distance: 0, bearing: 0 }; // identical points
+    do {
+      const sinLambda=Math.sin(lambda), cosLambda=Math.cos(lambda);
+      sinSigma = Math.sqrt((cosU2*sinLambda)**2 + (cosU1*sinU2-sinU1*cosU2*cosLambda)**2);
+      if(sinSigma === 0) return { distance: 0, bearing: 0 }; // coincident points
+      cosSigma = sinU1*sinU2 + cosU1*cosU2*cosLambda;
+      sigma = Math.atan2(sinSigma, cosSigma);
+      sinAlpha = cosU1*cosU2*sinLambda/sinSigma;
+      cosSqAlpha = 1-sinAlpha*sinAlpha;
+      cos2SigmaM = cosSqAlpha!==0 ? cosSigma - 2*sinU1*sinU2/cosSqAlpha : 0;
+      const C = f/16*cosSqAlpha*(4+f*(4-3*cosSqAlpha));
+      lambdaPrev = lambda;
+      lambda = L + (1-C)*f*sinAlpha*(sigma+C*sinSigma*(cos2SigmaM+C*cosSigma*(-1+2*cos2SigmaM*cos2SigmaM)));
+    } while(Math.abs(lambda-lambdaPrev) > 1e-12 && --iterLimit>0);
+
+    const uSq = cosSqAlpha*(a*a-b*b)/(b*b);
+    const A = 1+uSq/16384*(4096+uSq*(-768+uSq*(320-175*uSq)));
+    const B = uSq/1024*(256+uSq*(-128+uSq*(74-47*uSq)));
+    const deltaSigma = B*sinSigma*(cos2SigmaM+B/4*(cosSigma*(-1+2*cos2SigmaM*cos2SigmaM)-B/6*cos2SigmaM*(-3+4*sinSigma*sinSigma)*(-3+4*cos2SigmaM*cos2SigmaM)));
+    const distance = b*A*(sigma-deltaSigma);
+    const bearing = Math.atan2(cosU2*Math.sin(lambda), cosU1*sinU2-sinU1*cosU2*Math.cos(lambda));
+    return { distance, bearing };
+  }
+
+  // Vincenty's DIRECT formula: given a start point, bearing, and distance,
+  // find the destination lat/lon. This is the inverse of the azimuthal
+  // equidistant projection used everywhere else in this file (project()
+  // goes lat/lon -> distance+bearing -> ENU x,y; this goes the other way)
+  // — needed only to figure out which lat/lon area the current canvas
+  // view covers, so the right OSM background tiles can be requested.
+  function vincentyDirect(lat1Deg, lon1Deg, bearingDeg, distance){
+    const a = 6378137.0, f = 1/298.257223563, b = a*(1-f);
+    const alpha1 = bearingDeg*Math.PI/180;
+    const sinAlpha1 = Math.sin(alpha1), cosAlpha1 = Math.cos(alpha1);
+    const tanU1 = (1-f)*Math.tan(lat1Deg*Math.PI/180);
+    const cosU1 = 1/Math.sqrt(1+tanU1*tanU1), sinU1 = tanU1*cosU1;
+    const sigma1 = Math.atan2(tanU1, cosAlpha1);
+    const sinAlpha = cosU1*sinAlpha1;
+    const cosSqAlpha = 1-sinAlpha*sinAlpha;
+    const uSq = cosSqAlpha*(a*a-b*b)/(b*b);
+    const A = 1+uSq/16384*(4096+uSq*(-768+uSq*(320-175*uSq)));
+    const B = uSq/1024*(256+uSq*(-128+uSq*(74-47*uSq)));
+    let sigma = distance/(b*A), sigmaPrev, cos2SigmaM, sinSigma, cosSigma;
+    let iterLimit = 200;
+    do {
+      cos2SigmaM = Math.cos(2*sigma1+sigma);
+      sinSigma = Math.sin(sigma); cosSigma = Math.cos(sigma);
+      const deltaSigma = B*sinSigma*(cos2SigmaM+B/4*(cosSigma*(-1+2*cos2SigmaM*cos2SigmaM)-B/6*cos2SigmaM*(-3+4*sinSigma*sinSigma)*(-3+4*cos2SigmaM*cos2SigmaM)));
+      sigmaPrev = sigma;
+      sigma = distance/(b*A) + deltaSigma;
+    } while(Math.abs(sigma-sigmaPrev) > 1e-12 && --iterLimit>0);
+    const x = sinU1*sinSigma - cosU1*cosSigma*cosAlpha1;
+    const lat2 = Math.atan2(sinU1*cosSigma+cosU1*sinSigma*cosAlpha1, (1-f)*Math.sqrt(sinAlpha*sinAlpha+x*x));
+    const lambda = Math.atan2(sinSigma*sinAlpha1, cosU1*cosSigma-sinU1*sinSigma*cosAlpha1);
+    const C = f/16*cosSqAlpha*(4+f*(4-3*cosSqAlpha));
+    const L = lambda - (1-C)*f*sinAlpha*(sigma+C*sinSigma*(cos2SigmaM+C*cosSigma*(-1+2*cos2SigmaM*cos2SigmaM)));
+    return { lat: lat2*180/Math.PI, lon: lon1Deg + L*180/Math.PI };
+  }
+
+  function enuToLatLon(lat0, lon0, x, y){
+    const distance = Math.sqrt(x*x + y*y);
+    if(distance < 1e-6) return { lat: lat0, lon: lon0 };
+    const bearing = (Math.atan2(x, y) * 180/Math.PI + 360) % 360;
+    return vincentyDirect(lat0, lon0, bearing, distance);
+  }
+
+  // ---------- OpenStreetMap background tiles (optional, off by default) ----------
+  // Standard Web Mercator slippy-map tiles. The track itself is projected
+  // with azimuthal equidistant (see project() above and §1 in the
+  // README), a different projection — but verified (against a real tile's
+  // four corners, a few km from a representative origin) that at
+  // session scale the two agree closely enough that each tile can be
+  // drawn as a single undistorted axis-aligned image: opposite edge
+  // lengths matched to within 0.02% and edge angles to within 0.001° in
+  // that check, well under anything visible. No need for a full quad warp.
+  const osmTileCache = {}; // "z/x/y" -> {img, loaded, failed}
+  const OSM_TILE_SIZE = 256;
+  const OSM_MAX_ZOOM = 19;
+  const OSM_MAX_TILES_PER_DRAW = 144; // safety cap — skip drawing rather than fetch an unreasonable number of tiles if something computes a huge range
+
+  function osmTileUrl(z, x, y){
+    return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+  }
+
+  function getOsmTile(z, x, y){
+    const n = Math.pow(2, z);
+    x = ((x % n) + n) % n; // tiles wrap around in longitude
+    if(y < 0 || y >= n) return null; // no wraparound at the poles
+    const key = `${z}/${x}/${y}`;
+    let entry = osmTileCache[key];
+    if(!entry){
+      entry = { img: new Image(), loaded: false, failed: false };
+      entry.img.onload = () => { entry.loaded = true; if(showMapBackground) drawMap(); };
+      entry.img.onerror = () => { entry.failed = true; };
+      entry.img.src = osmTileUrl(z, x, y);
+      osmTileCache[key] = entry;
+    }
+    return entry;
+  }
+
+  function drawOsmBackground(ctx, sx, sy, w, h, scale, centerX, centerY){
+    if(points.length === 0) return;
+    const lats = points.map(p=>p.lat), lons = points.map(p=>p.lon);
+    const lat0 = (Math.min(...lats)+Math.max(...lats))/2;
+    const lon0 = (Math.min(...lons)+Math.max(...lons))/2;
+
+    // pick a zoom level whose own resolution roughly matches our current view
+    const metersPerPixel = 1/scale;
+    let zoom = Math.round(Math.log2(156543.03392 * Math.cos(lat0*Math.PI/180) / metersPerPixel));
+    zoom = Math.max(0, Math.min(OSM_MAX_ZOOM, zoom));
+    const n = Math.pow(2, zoom);
+
+    function latLonToWorldPixel(lat, lon){
+      const worldX = (lon+180)/360 * OSM_TILE_SIZE * n;
+      const latRad = lat*Math.PI/180;
+      const worldY = (1 - Math.log(Math.tan(latRad) + 1/Math.cos(latRad))/Math.PI)/2 * OSM_TILE_SIZE * n;
+      return { worldX, worldY };
+    }
+    function tileCornerLatLon(tx, ty){
+      const lon = tx/n*360-180;
+      const latRad = Math.atan(Math.sinh(Math.PI*(1-2*ty/n)));
+      return { lat: latRad*180/Math.PI, lon };
+    }
+    // inverse of sx/sy above: screen pixel -> our ENU x,y
+    function screenToEnu(px, py){
+      return { x: (px-w/2)/scale + centerX, y: -(py-h/2)/scale + centerY };
+    }
+
+    // which lat/lon area is visible: invert our projection at all 4 canvas
+    // corners, then find the world-pixel bounds those cover at this zoom
+    const corners = [[0,0],[w,0],[0,h],[w,h]].map(([px,py])=>{
+      const enu = screenToEnu(px,py);
+      const ll = enuToLatLon(lat0, lon0, enu.x, enu.y);
+      return latLonToWorldPixel(ll.lat, ll.lon);
+    });
+    const wxMin = Math.min(...corners.map(c=>c.worldX)), wxMax = Math.max(...corners.map(c=>c.worldX));
+    const wyMin = Math.min(...corners.map(c=>c.worldY)), wyMax = Math.max(...corners.map(c=>c.worldY));
+    const txMin = Math.floor(wxMin/OSM_TILE_SIZE)-1, txMax = Math.floor(wxMax/OSM_TILE_SIZE)+1;
+    const tyMin = Math.floor(wyMin/OSM_TILE_SIZE)-1, tyMax = Math.floor(wyMax/OSM_TILE_SIZE)+1;
+
+    const tileCountX = txMax-txMin+1, tileCountY = tyMax-tyMin+1;
+    if(tileCountX*tileCountY > OSM_MAX_TILES_PER_DRAW || tileCountX<=0 || tileCountY<=0) return;
+
+    for(let tx=txMin; tx<=txMax; tx++){
+      for(let ty=tyMin; ty<=tyMax; ty++){
+        const entry = getOsmTile(zoom, tx, ty);
+        if(!entry || !entry.loaded) continue;
+        // project this tile's own corners into our ENU space, then to screen
+        const c0 = tileCornerLatLon(tx, ty);       // top-left
+        const c1 = tileCornerLatLon(tx+1, ty+1);   // bottom-right
+        const e0 = enuFromLatLon(lat0, lon0, c0.lat, c0.lon);
+        const e1 = enuFromLatLon(lat0, lon0, c1.lat, c1.lon);
+        const sx0 = sx(e0.x), sy0 = sy(e0.y);
+        const sx1 = sx(e1.x), sy1 = sy(e1.y);
+        ctx.drawImage(entry.img, sx0, sy0, sx1-sx0, sy1-sy0);
+      }
+    }
+  }
+
+  function enuFromLatLon(lat0, lon0, lat, lon){
+    const { distance, bearing } = vincentyInverse(lat0, lon0, lat, lon);
+    return { x: distance*Math.sin(bearing), y: distance*Math.cos(bearing) };
+  }
+
+  function project(){
+    // Azimuthal equidistant, centered on the track's own origin: for every
+    // point, compute its TRUE geodesic distance and bearing from the
+    // origin (Vincenty inverse, WGS84 ellipsoid), then place it in the
+    // plane at exactly that distance and bearing. This is a genuinely
+    // different, better fix than the earlier local-radius approach —
+    // that one still converted every point's degrees-to-metres using a
+    // SINGLE exchange rate fixed at the origin's own latitude, which is
+    // exactly correct only for points at the origin's own latitude and
+    // increasingly wrong moving away from it (see §1 in the README for
+    // the size of that error). Azimuthal equidistant has no such
+    // approximation to make: distance and bearing FROM THE ORIGIN are
+    // exact for every point individually, not shared from one reference
+    // point — there's no "wrong latitude" for the exchange rate to be
+    // computed at, because there's no fixed exchange rate at all.
+    const lats = points.map(p=>p.lat), lons = points.map(p=>p.lon);
+    const latMid = (Math.min(...lats) + Math.max(...lats)) / 2;
+    const lonMid = (Math.min(...lons) + Math.max(...lons)) / 2;
+
+    points.forEach(p=>{
+      const { distance, bearing } = vincentyInverse(latMid, lonMid, p.lat, p.lon);
+      p.x = distance * Math.sin(bearing); // east, metres
+      p.y = distance * Math.cos(bearing); // north, metres
+    });
+  }
+
+  // Duplicate timestamps — regardless of whether coordinates also match —
+  // mean dt=0 for that edge, which means speed = distance/0 = Infinity
+  // downstream in computeDerived, corrupting run detection, wind
+  // estimation, and anything else that reads speed from there on. A
+  // distinct failure mode from the duplicate-COORDINATE cleanup
+  // (removeDuplicateCoordPoints, below): that one wouldn't catch this,
+  // since the colliding points' coordinates can genuinely differ — a
+  // logging glitch stamping two distinct fixes with the same time is a
+  // different bug than a device re-logging one fix repeatedly.
+  //
+  // Runs after project() (needs each point's own x/y) but before
+  // computeDerived() (so the corrupted dt=0 edges never reach the
+  // kinematics at all). Points surviving removal keep their existing x/y
+  // unchanged — project() computes each point's position independently,
+  // with no dependency on its neighbors, so removing other points never
+  // invalidates a kept point's own projection.
+  //
+  // For a run of points sharing a timestamp, rather than arbitrarily
+  // keeping whichever the device happened to log first, keeps whichever
+  // ONE point minimizes the difference between the edge distance
+  // immediately BEFORE it (from the nearest already-kept point) and the
+  // edge distance immediately AFTER it (to the next distinct-timestamp
+  // point) — the point that best preserves a smooth, consistent step
+  // size through this moment, rather than risking an arbitrary pick that
+  // leaves a large jump on one side and a tiny one on the other.
+  function dedupeTimestamps(){
+    const deduped = [];
+    let i = 0;
+    while(i < points.length){
+      let j = i+1;
+      while(j < points.length && points[j].time.getTime() === points[i].time.getTime()) j++;
+      if(j - i === 1){
+        deduped.push(points[i]);
+      } else {
+        const prev = deduped.length > 0 ? deduped[deduped.length-1] : null;
+        const next = j < points.length ? points[j] : null;
+        let bestK = i, bestDiff = Infinity;
+        for(let k=i; k<j; k++){
+          const distBefore = prev ? Math.hypot(points[k].x-prev.x, points[k].y-prev.y) : 0;
+          const distAfter = next ? Math.hypot(next.x-points[k].x, next.y-points[k].y) : 0;
+          const diff = Math.abs(distBefore - distAfter);
+          if(diff < bestDiff){ bestDiff = diff; bestK = k; }
+        }
+        deduped.push(points[bestK]);
+      }
+      i = j;
+    }
+    if(deduped.length < points.length) points = deduped;
+  }
+
+  function computeDerived(){
+    const n = points.length;
+    derived = new Array(n).fill(null);
+    const R2D = 180/Math.PI;
+
+    // Kinematics, cause-and-effect attribution:
+    //   - Velocity: unchanged from before. For points A,B (2 points), the
+    //     segment vector AB/h is attributed to B — "the speed getting here."
+    //   - Acceleration/curvature: for points A,B,C, the CHANGE from velocity
+    //     AB to velocity BC — i.e. the acceleration — happened AT B, between
+    //     the two velocity samples, not at C. Acceleration causes velocity
+    //     change; putting cause and effect at the same point (the old
+    //     backward-difference scheme, which attributed both velocity(C) AND
+    //     the AB→BC acceleration to C) was the bug. Divided by (h1+h2)/2 —
+    //     the gap between the two segments' effective centers — which is
+    //     exact regardless of h1 vs h2 (same non-uniform second-derivative
+    //     identity used earlier in this project, just re-attributed to B
+    //     instead of averaged into a blended point).
+    //   - Tangential/centripetal/curvature at B are projected onto B's OWN
+    //     velocity (AB), not C's.
+    //
+    // Consequence: velocity/heading need only 1 point before them (valid
+    // from index 1 on — one point earlier than the old scheme). Acceleration
+    // needs a point on EACH side (valid from index 1 to n-2 — undefined at
+    // the very last point now, instead of the first two).
+
+    // Pass 1: velocity + heading, plain 2-point backward difference.
+    for(let i=1;i<n;i++){
+      const p0=points[i-1], p1=points[i];
+      const h = p1.t - p0.t;
+      const vx = (p1.x-p0.x)/h, vy = (p1.y-p0.y)/h;
+      const speed = Math.sqrt(vx*vx + vy*vy);
+      const heading = (Math.atan2(vx, vy) * R2D + 360) % 360;
+      const dtMs = p1.time.getTime() - p0.time.getTime();
+      // uniformSampling now depends on exactly one interval — the only one
+      // velocity itself uses — no more h1-vs-h2 distinction needed here.
+      const uniformSampling = baseDtMs != null && dtMs === baseDtMs;
+      derived[i] = {vx, vy, speed, heading, uniformSampling,
+        ax:null, ay:null, accelMag:null, tanAccel:null, centripetalAccel:null, curvature:null,
+        headingUnwrapped:null};
+    }
+
+    // Heading unwrap, sequential over whatever range has velocity.
+    let prevUnwrapped = null;
+    for(let i=1;i<n;i++){
+      if(!derived[i]) continue;
+      const heading = derived[i].heading;
+      let headingUnwrapped;
+      if(prevUnwrapped === null){
+        headingUnwrapped = heading;
+      } else {
+        let diff = heading - (prevUnwrapped % 360 + 360) % 360;
+        if(diff > 180) diff -= 360;
+        if(diff < -180) diff += 360;
+        headingUnwrapped = prevUnwrapped + diff;
+      }
+      derived[i].headingUnwrapped = headingUnwrapped;
+      prevUnwrapped = headingUnwrapped;
+    }
+
+    // Pass 2: acceleration/tangential/centripetal/curvature, attributed to
+    // the MIDDLE point B of window [i-1=A, i=B, i+1=C]. Needs velocity(B)
+    // and velocity(C), both already computed in pass 1.
+    //
+    // No gap-invalidation here (deliberately, unlike earlier in this
+    // project): a segment spanning a wide gap still has a legitimate
+    // average velocity — equivalent to imagining the gap sliced into equal
+    // heading/velocity sub-segments we just didn't sample. So if AB spans a
+    // gap, the acceleration this produces at B is a REAL discontinuity (a
+    // wide-window average velocity abruptly meeting a normal one) — a large,
+    // well-defined curvature/heading-rate spike right at the recovery point,
+    // rather than an artificially suppressed or undefined value. Whatever
+    // downstream classification logic gets built later (sail-state
+    // segmentation, etc.) can key off this directly, the same way it would
+    // key off any other real turn.
+    for(let i=1;i<=n-2;i++){
+      const vB = derived[i], vC = derived[i+1];
+      if(!vB || !vC) continue;
+      const h1 = points[i].t - points[i-1].t;   // A→B, feeds velocity(B)
+      const h2 = points[i+1].t - points[i].t;   // B→C, feeds velocity(C)
+      // Acceleration's time divisor: under the "sliced into equal constant-
+      // velocity sub-segments" model, velocity stays flat through almost the
+      // entire gap — the actual transition from vB to vC is concentrated at
+      // the real boundary, on the scale of ONE base sampling interval, not
+      // smeared across the gap's full duration. So cap each side at baseDt
+      // before averaging — a no-op for normal (non-gap) windows where h1/h2
+      // already equal baseDt, but stops a long gap edge from artificially
+      // diluting the computed acceleration/curvature by ~h1/baseDt.
+      const baseDtSec = baseDtMs != null ? baseDtMs/1000 : null;
+      const h1Eff = baseDtSec != null ? Math.min(h1, baseDtSec) : h1;
+      const h2Eff = baseDtSec != null ? Math.min(h2, baseDtSec) : h2;
+      const dt = (h1Eff + h2Eff) / 2;
+      const ax = (vC.vx - vB.vx)/dt, ay = (vC.vy - vB.vy)/dt;
+      const accelMag = Math.sqrt(ax*ax + ay*ay);
+      const speed = vB.speed; // the point's own speed display stays AB — unrelated to the projection choice below
+
+      // Project tangential/centripetal/curvature onto the AVERAGE of AB and
+      // BC, not AB alone. Tested both against a case with a known-exact
+      // answer: for constant-speed turning (|AB|=|BC|), AB and BC projections
+      // are algebraically identical (cross(AB,accel) = cross(BC,accel)
+      // always holds) and both are fine. But when speed is ALSO changing
+      // (the realistic case for a tack/jibe, and in general |AB|≠|BC|), the
+      // average matched a precise reference curvature roughly an order of
+      // magnitude better than using AB alone — the average is a much closer
+      // approximation of the true instantaneous velocity at B than the
+      // backward-looking AB by itself.
+      const projVx = (vB.vx + vC.vx)/2, projVy = (vB.vy + vC.vy)/2;
+      const projSpeed = Math.sqrt(projVx*projVx + projVy*projVy);
+      const cross = projVx*ay - projVy*ax;
+      const tanAccel = projSpeed > 1e-6 ? (ax*projVx + ay*projVy)/projSpeed : 0;
+      const centripetalAccel = projSpeed > 1e-6 ? cross/projSpeed : 0;
+      const curvature = projSpeed > 1e-6 ? cross/(projSpeed*projSpeed*projSpeed) : 0;
+
+      derived[i].ax = ax; derived[i].ay = ay; derived[i].accelMag = accelMag;
+      derived[i].tanAccel = tanAccel; derived[i].centripetalAccel = centripetalAccel; derived[i].curvature = curvature;
+    }
+
+    firstValid = 1;
+    lastValid = n-1;
+
+    hasDeviceSpeed = points.some(p=>p.rawSpeed !== null && !Number.isNaN(p.rawSpeed));
+  }
+
+  // Does edge i span a true gap — wider than dtMaxVar (beyond what this
+  // device's normal variable-rate sampling looks like), plus one base
+  // interval of slack (even a well-behaved fixed-rate track can drop a
+  // single sample transiently without that being a real gap). Shared by
+  // computeRuns (as one of the edge-level run-breaking checks) and by
+  // transition classification (to scan for a crash/dropout anywhere in a
+  // transition zone, not just at its edges).
+  function edgeGapFails(i){
+    if(dtMaxVar == null || baseDtMs == null) return false;
+    const dt = points[i].time.getTime() - points[i-1].time.getTime();
+    return dt > dtMaxVar + baseDtMs;
+  }
+
+  // Circular heading difference, normalized to (-180, 180].
+  function headingDiff(a, b){
+    let d = a - b;
+    d = ((d % 360) + 540) % 360 - 180;
+    return d;
+  }
+
+  // The last vertex still on the original side, just before heading
+  // crosses a given pole direction (the downwind pole for a jibe, the
+  // upwind pole for a tack) — i.e. where headingDiff(heading,
+  // poleDirection) is about to change sign on the very next edge, meaning
+  // the boat's heading is a moment away from swinging past the pole.
+  // Returns null if no crossing happens in this range at all (e.g. a
+  // failed attempt that broke off before ever actually swinging past the
+  // pole it was aiming for).
+  function findThroughIdx(startIdx, endIdx, poleDirection){
+    let prevSign = null;
+    for(let i=startIdx+1; i<=endIdx; i++){
+      const d = derived[i];
+      if(!d) continue;
+      const diff = headingDiff(d.heading, poleDirection);
+      const sign = diff >= 0 ? 1 : -1;
+      if(prevSign != null && sign !== prevSign) return i-1;
+      prevSign = sign;
+    }
+    return null;
+  }
+
+  // Circular mean heading over points[startIdx..endIdx] inclusive — averages
+  // unit vectors (sin,cos) rather than raw degrees, so it handles the 0/360
+  // wrap correctly (same atan2(x,y) compass convention used everywhere else).
+  function circularMeanHeading(startIdx, endIdx){
+    let sx=0, sy=0, n=0;
+    for(let j=startIdx;j<=endIdx;j++){
+      const h = derived[j].heading * Math.PI/180;
+      sx += Math.sin(h); sy += Math.cos(h); n++;
+    }
+    return (Math.atan2(sx/n, sy/n) * 180/Math.PI + 360) % 360;
+  }
+
+  // A "run" is a stretch where the general point of sail stays consistent.
+  // Edge-based: "edge i" is the segment from point i-1 to point i; its
+  // velocity/heading is derived[i]. curvature(i) describes the TRANSITION
+  // at point i, between the edge ending there and the edge starting there.
+  //
+  // State machine:
+  //   1. Start at a break point (track start, or the end of a previous run).
+  //   2. Accumulate warm-up edges from the break point until minSec is
+  //      covered.
+  //   3. Every warm-up edge must agree with the window's own narrow-angle
+  //      average, and pass the speed/device-disagreement check. Either
+  //      failing ANY edge aborts warm-up — slide the break point +1, retry
+  //      the whole window from scratch.
+  //   4. Curvature is checked at every vertex EXCEPT the window's own start:
+  //      the start is already a break point, so it's expected/allowed to
+  //      have high or undefined curvature there — that's what makes it a
+  //      break in the first place. An INNER vertex failing curvature aborts
+  //      warm-up entirely (same as step 3). But if curvature fails exactly
+  //      at the window's own END, that's not a failure — it just means this
+  //      is a minimal candidate run, terminating right there; skip extension
+  //      and go straight to committing it.
+  //   5. Otherwise, extend one point at a time against the FIXED warm-up
+  //      reference: if the new edge fails heading or speed, its start point
+  //      becomes the run's end (the edge and its own end point are
+  //      excluded). If the edge passes, its end point joins the run; THEN
+  //      check curvature there — if it fails, the run stops extending but
+  //      still includes that point (it arrived fine; only the next
+  //      transition looks bad).
+  //   6. A completed run is checked against the minimum duration. If it's
+  //      kept, resume the search at the run's own end (shared boundary,
+  //      unchanged). If it's abandoned (too short), where to resume depends
+  //      on why it ended: a HEADING-caused ending means the window's
+  //      reference direction itself may have been a poor fit — retry from
+  //      just one point later (break point + 1), giving nearby starting
+  //      points a chance at a better, longer-lived interpretation. A
+  //      velocity- or curvature-caused ending is a genuine physical event —
+  //      retrying nearby would hit the same wall, so skip straight past to
+  //      the run's own end instead.
+  //
+  // No gap-invalidation gating: a point right after a gap is not specially
+  // excluded — its velocity (a gap-spanning average) is legitimate, and if
+  // it implies an abrupt discontinuity, the ordinary curvature/heading
+  // checks catch it and break the run there naturally.
+  function computeRuns(){
+    const runs = [];
+    const minSec = parseFloat(runMinSecInput.value) || 0;
+    const minRunDuration = parseFloat(runMinDurationInput.value) || 0;
+    const narrowT = parseFloat(runNarrowHeadingThreshInput.value) || 0;
+    const wideT = parseFloat(runBreakHeadingThreshInput.value) || 0;
+    const curvT = parseFloat(runCurvThreshInput.value);
+    const lowSpeedT = parseFloat(runLowSpeedThreshInput.value);
+    const deviceDisagreeT = parseFloat(runDeviceDisagreeThreshInput.value);
+
+    function curvatureFails(i){
+      const d = derived[i];
+      if(!d || d.curvature == null) return false; // undefined ≠ failure
+      return Math.abs(d.curvature) >= curvT;
+    }
+    // Edge-level check: too slow to still be "sailing," (when device speed
+    // exists) the derived and device speed have diverged too far to trust this
+    // edge, or the edge spans a true gap (wider than dtMaxVar — beyond what
+    // this device's normal variable-rate sampling looks like, so treated as
+    // a genuine dropout rather than just a slower sample).
+    function edgeFails(i){
+      const d = derived[i];
+      if(!d) return false;
+      if(d.speed <= lowSpeedT) return true;
+      const p = points[i];
+      if(p.rawSpeed != null && !Number.isNaN(p.rawSpeed) && (d.speed - p.rawSpeed) >= deviceDisagreeT) return true;
+      if(edgeGapFails(i)) return true;
+      return false;
+    }
+    function pointUsable(i){
+      return !!derived[i];
+    }
+
+    let breakPoint = firstValid;
+    while(breakPoint <= lastValid){
+      if(!pointUsable(breakPoint)){ breakPoint++; continue; }
+
+      // --- accumulate warm-up edges until minSec is covered ---
+      let e = breakPoint, longEnough = true;
+      while(points[e].t - points[breakPoint].t < minSec){
+        if(e+1 > lastValid || !pointUsable(e+1)){ longEnough = false; break; }
+        e++;
+      }
+      if(!longEnough){ breakPoint++; continue; }
+
+      // --- heading + speed must hold for every warm-up edge ---
+      const avg = circularMeanHeading(breakPoint+1, e);
+      let warmupOk = true;
+      for(let j=breakPoint+1;j<=e;j++){
+        if(Math.abs(headingDiff(derived[j].heading, avg)) >= narrowT){ warmupOk = false; break; }
+        if(edgeFails(j)){ warmupOk = false; break; }
+      }
+      if(!warmupOk){ breakPoint++; continue; }
+
+      // --- curvature: every vertex except the window's own start; its own
+      // end gets special handling (minimal run) instead of a hard failure ---
+      let curvatureFailedAtEnd = false;
+      for(let j=breakPoint+1;j<=e;j++){
+        if(curvatureFails(j)){
+          if(j === e){ curvatureFailedAtEnd = true; break; }
+          warmupOk = false; break; // inner vertex — hard failure
+        }
+      }
+      if(!warmupOk){ breakPoint++; continue; }
+
+      let runEnd = e;
+      let terminationReason = curvatureFailedAtEnd ? 'curvature' : null;
+      let wasWalkedBack = false; // distinguishes a walk-back-triggered curvature termination from a direct one (curvatureFails(k) during extension, or curvatureFailedAtEnd) — only the former is eligible for the reconnection pass below
+
+      if(!curvatureFailedAtEnd){
+        let k = e+1;
+        let maxCurvIdx = null, maxCurvMag = -1; // best candidate for "where the actual turn happened," tracked during extension only
+        while(k <= lastValid && pointUsable(k)){
+          const headingBad = Math.abs(headingDiff(derived[k].heading, avg)) >= wideT;
+          const speedBad = edgeFails(k);
+          if(headingBad || speedBad){
+            if(headingBad && maxCurvIdx !== null){
+              // Walk back to wherever curvature peaked during this
+              // extension, rather than stopping wherever the CUMULATIVE
+              // deviation from the fixed reference finally crossed the wide
+              // angle. That crossing point can sit well past the actual
+              // turn — curvature may have spiked early, with the boat
+              // drifting close to straight for a while afterward before the
+              // cumulative effect alone tripped the threshold. This also
+              // means a real but gradual tactical shift that never spikes
+              // curvature sharply enough to trip the per-point check, and
+              // never quite reaches the full 60° either, still gets located
+              // at its truest turning point once the cumulative drift
+              // eventually does cross — rather than breaking (if at all)
+              // at an arbitrary, possibly locally-straight point.
+              runEnd = maxCurvIdx;
+              terminationReason = 'curvature'; // we've now attributed this to a real turning point, not just cumulative drift
+              wasWalkedBack = true;
+            } else if(headingBad){
+              terminationReason = 'heading';
+            } else {
+              // speedBad: distinguish a genuine data gap from low-speed/
+              // device-disagreement — a gap specifically is the signal used
+              // to identify a crash/dropout downstream (see transition
+              // classification), so it needs its own distinct reason rather
+              // than being lumped in as generic 'velocity'.
+              terminationReason = edgeGapFails(k) ? 'gap' : 'velocity';
+            }
+            break; // k excluded — runEnd stays at its previous (possibly walked-back) value
+          }
+          runEnd = k; // edge passed — k joins the run
+          const cMag = derived[k].curvature != null ? Math.abs(derived[k].curvature) : -1;
+          if(cMag >= maxCurvMag){ maxCurvMag = cMag; maxCurvIdx = k; } // >= : ties favor the LATEST point, so uniform/constant-rate drift (no distinct peak) preserves the original wide-angle-tolerant stopping point instead of collapsing back to the first point of the drift
+          if(curvatureFails(k)){
+            terminationReason = 'curvature';
+            break; // k stays included, but stop extending past it
+          }
+          k++;
+        }
+      }
+
+      // Trailing straightness check: the run's tail — its last runTailEdges
+      // edges — must be internally consistent at the NARROW angle, same
+      // standard warm-up itself was held to. The wide-angle extend phase
+      // above allows a lot of drift from the ORIGINAL reference before it
+      // triggers a hard break, so a run can end with its last few points
+      // already gradually drifting into what will become the next turn,
+      // without ever tripping the wide threshold. If the tail alone isn't
+      // self-consistent, shrink the run by one point and retry — down to
+      // (never below) the warm-up window's own end, which was already
+      // separately validated.
+      const warmupEnd = e;
+      const tailEdges = parseInt(runTailSampleEdgesInput.value,10) || 1;
+      while(runEnd > warmupEnd){
+        const tailStart = Math.max(breakPoint+1, runEnd - tailEdges + 1);
+        const tailAvg = circularMeanHeading(tailStart, runEnd);
+        let tailOk = true;
+        for(let j=tailStart;j<=runEnd;j++){
+          if(Math.abs(headingDiff(derived[j].heading, tailAvg)) >= narrowT){ tailOk = false; break; }
+        }
+        if(tailOk) break;
+        runEnd--;
+      }
+
+      const duration = points[runEnd].t - points[breakPoint].t;
+      if(duration >= minRunDuration){
+        // Report the run pulled back by one edge on each side. The break
+        // point itself is exempt from every validation check (that
+        // exemption is exactly what allows it to BE a break point), so its
+        // own edge may not represent settled, steady-state sailing — and a
+        // run's last edge, if added during extension, was only held to the
+        // WIDE angle, not the narrow one. Giving back one edge at each end
+        // means downstream transition analysis (jibe classification etc.)
+        // gets these edges automatically as part of the transition zone,
+        // instead of needing separate lead-in/lead-out lookups into the
+        // adjacent run's own boundary.
+        let reportStart = breakPoint + 1, reportEnd = runEnd - 1;
+        if(reportStart > reportEnd){ reportStart = breakPoint; reportEnd = runEnd; } // too short to shrink — keep full extent rather than go degenerate
+        runs.push({startIdx: reportStart, endIdx: reportEnd, startT: points[reportStart].t, endT: points[reportEnd].t, duration: points[reportEnd].t-points[reportStart].t, terminationReason, wasWalkedBack});
+        breakPoint = runEnd; // shared boundary uses the FULL validated extent, not the shrunk report
+      } else {
+        // Abandoned: resume point depends on why it ended.
+        breakPoint = (terminationReason === 'heading') ? (breakPoint + 1) : runEnd;
+      }
+    }
+    // Post-pass: reconnect walk-back-triggered breaks. The walk-back in
+    // step 5 is doing its job correctly when it finds a real, sharp turning
+    // point — but sometimes that "peak" is itself just a mild, unremarkable
+    // deviation (a gentle jibe entry, say), only distinguishable from noise
+    // in hindsight once both sides of the break are known. So: revisit
+    // every run that ended via a walk-back, and reconnect it with the next
+    // run if (a) lead-in and lead-out differ by less than reconnectAngle
+    // (its own threshold, not the warm-up narrow angle — this is a
+    // deliberately looser bar, since the two sides of a real gentle jibe
+    // entry can differ more than warm-up's own strict self-consistency
+    // standard while still clearly being "basically the same run") and
+    // (b) nothing else in the transition zone would have disqualified it
+    // anyway (a genuine gap, stall, device disagreement, or a curvature
+    // spike past runCurvThresh). Iterates to a fixed point since a
+    // reconnected run can itself have inherited a walk-back flag from its
+    // new right-hand side, enabling a further chained merge.
+    const reconnectAngle = parseFloat(reconnectAngleInput.value) || 0;
+    let merged = true;
+    while(merged){
+      merged = false;
+      for(let idx=0; idx<runs.length-1; idx++){
+        const runA = runs[idx], runB = runs[idx+1];
+        if(!runA.wasWalkedBack) continue;
+
+        const dIn = derived[runA.endIdx], dOut = derived[runB.startIdx];
+        if(!dIn || !dOut) continue;
+        const headingDev = Math.abs(headingDiff(dOut.heading, dIn.heading));
+        if(headingDev >= reconnectAngle) continue;
+
+        let disqualified = false;
+        for(let i=runA.endIdx; i<=runB.startIdx; i++){
+          if(edgeFails(i) || curvatureFails(i)){ disqualified = true; break; }
+        }
+        if(disqualified) continue;
+
+        runs.splice(idx, 2, {
+          startIdx: runA.startIdx, endIdx: runB.endIdx,
+          startT: runA.startT, endT: runB.endT,
+          duration: runB.endT - runA.startT,
+          terminationReason: runB.terminationReason,
+          wasWalkedBack: runB.wasWalkedBack
+        });
+        merged = true;
+        break; // indices shifted — restart the scan
+      }
+    }
+
+    return runs;
+  }
+
+  // ---------- wind estimate ----------
+  // A sailboat physically cannot sail into a cone around the true wind
+  // direction (the "no-go zone," typically ~30-45° either side of the
+  // wind on each tack). So: build a distance-weighted histogram of heading
+  // across every edge that's part of a validated run (deliberately
+  // excluding turns/transitions — those smear heading across the whole
+  // compass and would obscure the gap), then find the widest contiguous
+  // arc of near-zero density. Its center is the wind direction; its width
+  // is roughly twice the boat's closest pointing angle.
+  const WIND_BIN_DEG = 1;
+  const WIND_NUM_BINS = 360 / WIND_BIN_DEG;
+
+  // Distance per heading bin (as before, just finer now — 1° instead of
+  // 5°), PLUS the max speed seen in each bin. The speed histogram exists
+  // so bucket stats (median heading, top-speed direction) can later be
+  // computed by scanning 360 bins instead of every edge in the track —
+  // needed for the override-triggered recompute below, which redoes the
+  // bucket split for an arbitrary manually-chosen axis and needs to stay
+  // fast enough to redraw live, not just once per full estimate.
+  function computeWindHistogram(){
+    const bins = new Array(WIND_NUM_BINS).fill(0);
+    const maxSpeedBins = new Array(WIND_NUM_BINS).fill(0);
+    let totalDist = 0;
+    currentRuns.forEach(run=>{
+      for(let i=run.startIdx+1; i<=run.endIdx; i++){
+        const d = derived[i];
+        if(!d) continue;
+        const dx = points[i].x - points[i-1].x, dy = points[i].y - points[i-1].y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        const binIdx = Math.floor(((d.heading % 360)+360)%360 / WIND_BIN_DEG) % WIND_NUM_BINS;
+        bins[binIdx] += dist;
+        if(d.speed > maxSpeedBins[binIdx]) maxSpeedBins[binIdx] = d.speed;
+        totalDist += dist;
+      }
+    });
+    return { bins, maxSpeedBins, totalDist };
+  }
+
+  // Circular angular difference, always in [0, 180].
+  function angleDiff180(a, b){
+    let d = Math.abs(a - b) % 360;
+    return d > 180 ? 360 - d : d;
+  }
+
+  // ---------- balanced-split wind estimation ----------
+  // Finding two separate cluster PEAKS (a sliding-window max search) turned
+  // out to be more machinery than needed. Simpler: a sailing session
+  // typically covers both tacks roughly evenly, so instead of hunting for
+  // peaks, just rotate a single 180°/180° divider around the compass and
+  // find the rotation where the two halves' total distance is most equal.
+  //
+  // On its own, minimizing the difference isn't enough: the search is free
+  // to place the boundary THROUGH a single real cluster, splitting its
+  // distance roughly in half and looking artificially balanced even though
+  // there's really only one direction of sailing, not two symmetric tacks
+  // (confirmed on real tracks, not just a theoretical concern). Fix:
+  // require a genuine WIDE gap — near-zero distance across a real angular
+  // span, not just a single bin — at AT LEAST ONE pole of a candidate
+  // split (the axis itself, or its antipode).
+  //
+  // Only one pole, not both: a real no-go zone is reliably present (a
+  // boat physically can't point there), but a clean gap on the downwind
+  // side isn't guaranteed the same way — plenty of real sessions include
+  // some genuinely dead-downwind sailing, which fills in what would
+  // otherwise be a gap there. Requiring both poles rejected valid splits
+  // on exactly this basis. A wide gap on either side alone already rules
+  // out the actual failure mode this check exists for (cutting through
+  // the middle of one continuous cluster, which never has ANY real gap
+  // nearby, on either pole) just as well as requiring both would.
+  //
+  // "Wide," not a single bin, matters for its own reason: bins are 1° now
+  // (changed elsewhere, for the unrelated reason of making bucket-stats
+  // recomputation fast enough to redraw live), and a single 1°-wide
+  // density check is far more exposed to one stray edge's noise than a
+  // real angular window is.
+  const SPLIT_GAP_MIN_WIDTH_DEG = 15;
+
+  function findBalancedSplitAxis(bins){
+    const maxBin = Math.max(...bins);
+    if(maxBin <= 0) return null;
+    const gapThreshold = maxBin * 0.02; // "near-zero" — 2% of the peak bin
+    const binAt = (deg) => bins[Math.floor(((deg % 360)+360)%360 / WIND_BIN_DEG) % WIND_NUM_BINS];
+    const hasWideGap = (poleDeg) => {
+      const half = SPLIT_GAP_MIN_WIDTH_DEG / 2;
+      for(let d = -half; d < half; d += WIND_BIN_DEG){
+        if(binAt(poleDeg + d) > gapThreshold) return false;
+      }
+      return true;
+    };
+
+    let bestAxis = null, bestDiff = Infinity, bestSumA = 0, bestSumB = 0;
+    for(let a = 0; a < 180; a += WIND_BIN_DEG){
+      if(!hasWideGap(a) && !hasWideGap(a+180)) continue; // no wide gap at either pole — disqualified
+      let sumA = 0, sumB = 0;
+      for(let i=0;i<bins.length;i++){
+        const binCenter = (i + 0.5) * WIND_BIN_DEG;
+        const rel = ((binCenter - a) % 360 + 360) % 360;
+        if(rel < 180) sumA += bins[i]; else sumB += bins[i];
+      }
+      const diff = Math.abs(sumA - sumB);
+      if(diff < bestDiff){ bestDiff = diff; bestAxis = a; bestSumA = sumA; bestSumB = sumB; }
+    }
+    if(bestAxis === null) return null; // no rotation had a wide gap at either pole
+    return { axis: bestAxis, sumA: bestSumA, sumB: bestSumB };
+  }
+
+  // Everything needed from one bucket (half-circle, relative to some axis):
+  // the vector average of its own top-N fastest BINS (by max speed), and
+  // its distance-weighted MEDIAN heading — both computed from the
+  // precomputed 1°-granular histograms, not by re-scanning every edge.
+  // At 1° resolution this loses essentially no accuracy versus the
+  // original edge-based version (real GPS heading noise between
+  // consecutive points is rarely finer than this), while making the whole
+  // function cheap enough to call repeatedly — needed for the
+  // override-triggered recompute below, which redoes this for an
+  // arbitrary manually-chosen axis and has to stay fast enough to redraw
+  // live, not just once per full estimate.
+  //
+  // Median, not mean: a vector-sum mean is sensitive to the TOTAL mass of
+  // scattered small-distance bins at unusual headings (warmup wobble,
+  // transition-zone leakage, noise), even though each one individually
+  // contributes little — a long tail of them can still drag the resultant
+  // vector's angle away from where the real bulk of sailing actually is.
+  // A weighted median only cares about where the cumulative distance
+  // crosses 50%, which a scattered tail barely moves unless it's a large
+  // fraction of the total. Computed by sorting bins by their position
+  // relative to the bucket's own axis (linearizing the half-circle without
+  // wraparound ambiguity, since a bucket never spans more than 180°), then
+  // walking the sorted list until cumulative distance reaches half the
+  // bucket's total.
+  function computeBucketStats(bins, maxSpeedBins, axisDeg, wantSideA){
+    const sideBins = [];
+    let totalDist = 0;
+    for(let i=0;i<bins.length;i++){
+      if(bins[i] <= 0) continue;
+      const binCenter = (i+0.5) * WIND_BIN_DEG;
+      const rel = ((binCenter - axisDeg) % 360 + 360) % 360;
+      const inSideA = rel < 180;
+      if(inSideA !== wantSideA) continue;
+      sideBins.push({ binCenter, rel, dist: bins[i], speed: maxSpeedBins[i] });
+      totalDist += bins[i];
+    }
+    if(sideBins.length === 0 || totalDist <= 0) return null;
+
+    const count = Math.max(1, WIND_EST_TOP_SPEED_COUNT);
+    const bySpeed = sideBins.slice().sort((a,b) => b.speed - a.speed);
+    const top = bySpeed.slice(0, count);
+    let tvx = 0, tvy = 0;
+    top.forEach(b=>{
+      const rad = b.binCenter * Math.PI/180;
+      tvx += b.speed * Math.sin(rad);
+      tvy += b.speed * Math.cos(rad);
+    });
+    tvx /= top.length; tvy /= top.length;
+    const topSpeedMag = Math.sqrt(tvx*tvx + tvy*tvy);
+    if(topSpeedMag <= 0) return null;
+    const topSpeedAngle = (Math.atan2(tvx, tvy) * 180/Math.PI + 360) % 360;
+
+    const byRel = sideBins.slice().sort((a,b) => a.rel - b.rel);
+    const halfDist = totalDist / 2;
+    let cumDist = 0, medianHeading = byRel[byRel.length-1].binCenter;
+    for(const b of byRel){
+      cumDist += b.dist;
+      if(cumDist >= halfDist){ medianHeading = b.binCenter; break; }
+    }
+
+    return { topSpeedAngle, avgHeading: medianHeading, totalDist };
+  }
+
+  // Steps 3-4 of the wind estimate, factored out so they can be reused for
+  // bucket pairs OTHER than the ones the automatic split produced — e.g.
+  // for the wind-direction "recalculate" button, when a manual tack-split
+  // override is active and wind direction should be derived from THAT
+  // split's own buckets, not silently ignored in favor of the fully
+  // automatic split. Returns null for a degenerate bisector (the two
+  // buckets' median headings exactly opposite).
+  function computeWindDirectionFromBuckets(bucketA, bucketB){
+    if(!bucketA || !bucketB) return null;
+
+    // Step 3: refined wind axis from the two buckets' OWN median headings.
+    const a1r = bucketA.avgHeading*Math.PI/180, a2r = bucketB.avgHeading*Math.PI/180;
+    const rvx = Math.sin(a1r)+Math.sin(a2r), rvy = Math.cos(a1r)+Math.cos(a2r);
+    if(Math.abs(rvx)<1e-9 && Math.abs(rvy)<1e-9) return null; // degenerate bisector
+    const refinedAxis = (Math.atan2(rvx, rvy) * 180/Math.PI + 360) % 360;
+
+    // Step 4: normally, trust whichever bucket shows the LARGER separation
+    // between its top-speed heading and its median heading as the downwind
+    // reference — that's the bucket with the clearer signal. For a
+    // balanced session both buckets agree anyway; for a lopsided one, the
+    // weaker side no longer gets an equal (and noisier) vote.
+    //
+    // But when BOTH buckets' separations are weak (under
+    // windOverrideWeakSpeedThresh, default 15°) — meaning the speed-based
+    // signal this whole step normally leans on is itself unreliable, e.g.
+    // an overpowered track where upwind can be sailed just as fast as
+    // reaching — fall back to the transition-distance indicator instead
+    // (built from position, not speed — see below), provided it clears
+    // its own reliability bar (windIndicatorMinSamples /
+    // windIndicatorMinDiff — the same unified thresholds the view-only
+    // display uses, so "reliable enough to show" and "reliable enough to
+    // act on" mean the same thing).
+    const rotA = headingDiff(bucketA.avgHeading, bucketA.topSpeedAngle);
+    const rotB = headingDiff(bucketB.avgHeading, bucketB.topSpeedAngle);
+
+    const weakThresh = WIND_OVERRIDE_WEAK_SPEED_THRESH;
+    const speedSignalWeak = Math.abs(rotA) < weakThresh && Math.abs(rotB) < weakThresh;
+
+    let windDirection = null, usedTransitionOverride = false, overrideIndicator = null;
+    if(speedSignalWeak){
+      const ind = computeTransitionDisplacementIndicator(refinedAxis);
+      if(ind && ind.reliable){
+        windDirection = ind.agrees ? refinedAxis : (refinedAxis + 180) % 360;
+        usedTransitionOverride = true;
+        overrideIndicator = ind;
+      }
+    }
+
+    if(windDirection == null){
+      const referenceBucket = Math.abs(rotA) >= Math.abs(rotB) ? bucketA : bucketB;
+      const refFast = angleDiff180(referenceBucket.topSpeedAngle, refinedAxis) < 90;
+      const downwindDirection = refFast ? refinedAxis : (refinedAxis + 180) % 360;
+      windDirection = (downwindDirection + 180) % 360;
+    }
+
+    return { refinedAxis, windDirection, rotA, rotB, usedTransitionOverride, overrideIndicator };
+  }
+
+  function computeWindEstimate(){
+    const { bins, maxSpeedBins, totalDist } = computeWindHistogram();
+    if(totalDist <= 0) return { ok:false, reason: 'no run data yet', bins, maxSpeedBins, totalDist };
+
+    // Step 1: find the balanced-split axis (a rough starting point) and
+    // use it to define two buckets.
+    const split = findBalancedSplitAxis(bins);
+    if(!split){
+      return { ok:false, reason: 'no rotation of the split axis had a genuine gap at both poles', bins, maxSpeedBins, totalDist };
+    }
+    const roughSplitAxis = split.axis;
+
+    // Skewness check, on the rough split: even at the BEST (most-balanced)
+    // rotation, if one side still has under windEstMinBucketRatio (67%) of
+    // the other side's distance, the underlying assumption — that a
+    // session covers both tacks roughly evenly — doesn't hold well enough
+    // here to trust the split at all. Checked here, before refinement,
+    // since this is a question about whether the session itself has the
+    // right shape at all, not about exactly where the boundary sits.
+    const minBucketRatio = WIND_EST_MIN_BUCKET_RATIO;
+    const biggerSum = Math.max(split.sumA, split.sumB), smallerSum = Math.min(split.sumA, split.sumB);
+    if(biggerSum <= 0 || (smallerSum / biggerSum) < minBucketRatio){
+      return { ok:false, reason: `even the most balanced split is skewed: smaller side is only ${(biggerSum>0 ? smallerSum/biggerSum*100 : 0).toFixed(0)}% of the larger, need ${(minBucketRatio*100).toFixed(0)}%`, bins, maxSpeedBins, totalDist, splitAxis: roughSplitAxis };
+    }
+
+    // Step 2: buckets from the rough split, and the wind axis they bisect
+    // to — this is the same idea as the manual tack-split override
+    // (redrawAll), now folded into the default automatic pipeline as a
+    // refinement step instead of only being available by hand.
+    const roughBucketA = computeBucketStats(bins, maxSpeedBins, roughSplitAxis, true);
+    const roughBucketB = computeBucketStats(bins, maxSpeedBins, roughSplitAxis, false);
+    if(!roughBucketA || !roughBucketB){
+      return { ok:false, reason: `one bucket had no valid edges (${!roughBucketA?'side A':'side B'} empty)`, bins, maxSpeedBins, totalDist, splitAxis: roughSplitAxis, bucketA: roughBucketA, bucketB: roughBucketB };
+    }
+    const roughDirResult = computeWindDirectionFromBuckets(roughBucketA, roughBucketB);
+    if(!roughDirResult){
+      return { ok:false, reason: 'the two buckets\' median headings are exactly opposite — degenerate bisector', bins, maxSpeedBins, totalDist, splitAxis: roughSplitAxis, bucketA: roughBucketA, bucketB: roughBucketB };
+    }
+
+    // Step 3: re-split using THAT wind axis as the new split boundary,
+    // rather than the rough histogram-search axis — a session's two tacks
+    // are symmetric about the wind, not about wherever the balanced-split
+    // search happened to land, so re-splitting against the wind axis
+    // itself should sit closer to the true boundary between them.
+    const refinedSplitAxis = roughDirResult.refinedAxis;
+    const bucketA = computeBucketStats(bins, maxSpeedBins, refinedSplitAxis, true);
+    const bucketB = computeBucketStats(bins, maxSpeedBins, refinedSplitAxis, false);
+    if(!bucketA || !bucketB){
+      return { ok:false, reason: `one bucket had no valid edges after refinement (${!bucketA?'side A':'side B'} empty)`, bins, maxSpeedBins, totalDist, splitAxis: refinedSplitAxis, bucketA, bucketB };
+    }
+
+    // Step 4: final wind direction (which side is downwind), same as
+    // before, just now run against the refined buckets.
+    const dirResult = computeWindDirectionFromBuckets(bucketA, bucketB);
+    if(!dirResult){
+      return { ok:false, reason: 'the two buckets\' median headings are exactly opposite — degenerate bisector (after refinement)', bins, maxSpeedBins, totalDist, splitAxis: refinedSplitAxis, bucketA, bucketB };
+    }
+
+    return { ok:true, bins, maxSpeedBins, totalDist, splitAxis: refinedSplitAxis, bucketA, bucketB, ...dirResult };
+  }
+
+  // ---------- transition-displacement indicator (view-only cross-check) ----------
+  // The main estimate above leans on speed (top-speed sailing is presumed
+  // more downwind than the median) — an assumption that can break down on
+  // overpowered tracks, where a boat can point upwind just as fast as it
+  // reaches. This is a genuinely independent signal that doesn't touch
+  // speed at all: for every transition (any gap between consecutive runs —
+  // jibe, tack, failed attempt, crash, or unclassified, all treated the
+  // same), draw a vector from the transition's start (the preceding run's
+  // own end) to its end (the next run's own start), and project it onto
+  // the wind axis. A jibe typically carries speed smoothly through a
+  // downwind-crossing turn; a tack often involves slowing through or near
+  // head-to-wind. So transitions that net-displace toward downwind should,
+  // on average, cover more distance than ones that net-displace toward
+  // upwind — and whichever direction shows the larger average is taken as
+  // downwind by this indicator.
+  //
+  // Deliberately NOT fed back into the actual wind direction estimate —
+  // this is displayed alongside it as a cross-check, not a replacement.
+  // Needs a minimum sample count in BOTH directions to mean anything: a
+  // track that's nothing but tacks (or nothing but jibes) would have zero
+  // or near-zero samples on one side, and comparing "average of many" to
+  // "average of one or two" isn't a meaningful comparison at all.
+  function computeTransitionDisplacementIndicator(windDirection){
+    if(windDirection == null) return null;
+    const downwindDir = (windDirection + 180) % 360;
+    const downwindRad = downwindDir * Math.PI/180;
+    const dwx = Math.sin(downwindRad), dwy = Math.cos(downwindRad);
+
+    const maxDuration = WIND_INDICATOR_MAX_DURATION;
+    let sumDownwind = 0, countDownwind = 0, sumUpwind = 0, countUpwind = 0;
+    for(let i=0;i<currentRuns.length-1;i++){
+      const runA = currentRuns[i], runB = currentRuns[i+1];
+      const pA = points[runA.endIdx], pB = points[runB.startIdx];
+      if(!pA || !pB) continue;
+      // A long transition is more likely an intentional recording pause
+      // (stopping the watch to rest, adjust gear, etc.) than a real
+      // maneuver — the boat can end up anywhere after resuming, for
+      // reasons that have nothing to do with jibe/tack dynamics, which
+      // would poison the average with an unrelated displacement.
+      if(Number.isFinite(maxDuration) && (pB.t - pA.t) > maxDuration) continue;
+      const dx = pB.x - pA.x, dy = pB.y - pA.y;
+      const proj = dx*dwx + dy*dwy; // signed distance along the downwind axis
+      if(proj >= 0){ sumDownwind += proj; countDownwind++; }
+      else { sumUpwind += -proj; countUpwind++; }
+    }
+
+    const avgDownwind = countDownwind>0 ? sumDownwind/countDownwind : 0;
+    const avgUpwind = countUpwind>0 ? sumUpwind/countUpwind : 0;
+    // Single unified pair of thresholds (windIndicatorMinSamples,
+    // windIndicatorMinDiff) — used identically whether this is called for
+    // the view-only display or the weak-speed override, rather than two
+    // separate criteria for what's fundamentally the same reliability
+    // question.
+    const minSamples = Math.max(1, WIND_INDICATOR_MIN_SAMPLES);
+    const minDiff = WIND_INDICATOR_MIN_DIFF;
+    const reliable = countDownwind >= minSamples && countUpwind >= minSamples && Math.abs(avgDownwind - avgUpwind) >= minDiff;
+    // "agrees" means: transitions net-displacing toward the CURRENT
+    // estimate's downwind direction cover more distance on average than
+    // ones going the other way — i.e. this indicator independently backs
+    // up which side the main estimate already picked as downwind.
+    const agrees = avgDownwind >= avgUpwind;
+
+    return { sumDownwind, countDownwind, avgDownwind, sumUpwind, countUpwind, avgUpwind, reliable, agrees };
+  }
+
+  // ---------- transition classification (jibes and tacks) ----------
+  // Between two consecutive runs sits a transition zone — whatever the run
+  // detector didn't claim. Run boundaries are already pulled back by one
+  // edge on each side (see computeRuns) specifically so that a run's own
+  // reported start/end sit at points that were genuinely validated at the
+  // narrow angle — meaning the transition zone's own boundary points
+  // directly serve as lead-in/lead-out here, no separate lookup into the
+  // adjacent run needed.
+  //
+  // A jibe crosses through DOWNWIND; a tack crosses through UPWIND —
+  // otherwise identical logic, just aimed at the opposite pole. Classified:
+  // successful maneuvers, one failure mode (an aborted attempt) for each,
+  // and crash/recovery (a genuine data gap anywhere in the zone).
+  //
+  // Sign convention (verified numerically against this file's actual
+  // curvature formula): a RIGHT turn (heading increasing) produces
+  // NEGATIVE curvature; a LEFT turn (heading decreasing) produces
+  // POSITIVE curvature. So expected curvature sign = -sign(heading change).
+  //
+  // Crash detection is a fresh scan across the WHOLE zone, not a lookup of
+  // why the preceding run ended — a run can end for any reason and a crash
+  // can still occur later, mid-transition (e.g. losing control mid-jibe).
+  // A single transition can therefore produce TWO results: a failed
+  // jibe/tack attempt for whatever happened before the crash, plus a
+  // crash_recovery entry for the crash edge onward — never a full success,
+  // since a crash cutting the scan short means no real lead-out was ever
+  // observed to confirm completion.
+  function scanForCrash(startIdx, endIdx){
+    for(let i=startIdx;i<=endIdx;i++){
+      if(edgeGapFails(i)) return i;
+    }
+    return null;
+  }
+
+  // Core jibe/tack test over an explicit range. If `allowSuccess` is false,
+  // this NEVER returns a success classification — only a failed attempt or
+  // null — used when the range was truncated by an upcoming crash, so
+  // there's no confirmed lead-out to judge success against.
+  function classifyPoleInRange(rangeStart, rangeEnd, poleDirection, successType, failType, allowSuccess){
+    const dIn = derived[rangeStart];
+    if(!dIn) return null;
+    const leadInHeading = dIn.heading;
+
+    // Expected turn direction comes from lead-in ALONE: whichever rotation
+    // reaches the target pole first (the shorter arc) is what this
+    // maneuver requires from here — a strict left/right test relative to
+    // the wind axis, not a proximity test against either pole. Since
+    // turning toward one pole and turning toward the other are always
+    // opposite rotations (except from the single degenerate beam-reach
+    // heading, exactly 90° from both poles), a jibe-shaped stretch can
+    // never simultaneously satisfy the tack test, or vice versa.
+    const toPole = headingDiff(poleDirection, leadInHeading);
+    if(toPole === 0) return null; // lead-in already points exactly at the pole — no turn direction to expect
+    const expectedCurvatureSign = -Math.sign(toPole);
+
+    // Curvature consistency across the range, AND a low-speed check (same
+    // threshold as run detection, runLowSpeedThreshInput) — a stalled edge
+    // means the boat isn't really turning anymore, it's stopped, which is a
+    // different kind of "this attempt ended" than a curvature deviation.
+    //
+    // The two are marked differently: a curvature break is INCLUSIVE — the
+    // high-curvature point itself is part of the maneuver's story (it's the
+    // moment things went wrong DURING the turn), so it marks the end of the
+    // attempt. A speed break is EXCLUSIVE — the stalled edge isn't part of
+    // the attempt at all, so the attempt is considered to end at its START
+    // (the last point still actually moving), not at the stalled point
+    // itself.
+    //
+    // Small tolerance on curvature, on the opposite side of zero: a brief
+    // near-zero or slightly-wrong-sign blip (GPS noise, a momentary flat
+    // spot mid-turn) shouldn't by itself register as a genuine break — only
+    // a curvature that's meaningfully in the wrong direction should.
+    // Same-sign values were always accepted regardless of magnitude; this
+    // only extends that acceptance a little past zero into the opposite
+    // sign's territory.
+    const CURVATURE_BREAK_TOLERANCE = 0.02;
+    const lowSpeedT = parseFloat(runLowSpeedThreshInput.value);
+    let breakIdx = null, breakKind = null;
+    for(let i = rangeStart; i <= rangeEnd; i++){
+      const d = derived[i];
+      if(!d || d.speed <= lowSpeedT){
+        breakIdx = i; breakKind = 'speed';
+        break;
+      }
+      const c = d.curvature;
+      const curvatureOk = c != null && (Math.sign(c) === expectedCurvatureSign || Math.abs(c) <= CURVATURE_BREAK_TOLERANCE);
+      if(!curvatureOk){
+        breakIdx = i; breakKind = 'curvature';
+        break;
+      }
+    }
+
+    if(breakIdx === null){
+      // held the expected direction (and kept moving) across the whole range
+      if(!allowSuccess){
+        // range was truncated by an upcoming crash — judge as an ATTEMPT
+        // up through rangeEnd, never as a confirmed success
+        const timeSinceLeadIn = points[rangeEnd].t - points[rangeStart].t;
+        const headingChangeSoFar = Math.abs(headingDiff(derived[rangeEnd].heading, leadInHeading));
+        if(timeSinceLeadIn >= 2 && headingChangeSoFar >= 10){
+          return { type: failType, preBreakIdx: rangeEnd, attemptEndIdx: rangeEnd, transitionStart: rangeStart, transitionEnd: rangeEnd, expectedCurvatureSign };
+        }
+        return null;
+      }
+      const dOut = derived[rangeEnd];
+      if(!dOut) return null;
+      const totalHeadingChange = Math.abs(headingDiff(dOut.heading, leadInHeading));
+      if(totalHeadingChange < 60) return null;
+      return { type: successType, transitionStart: rangeStart, transitionEnd: rangeEnd, expectedCurvatureSign };
+    }
+
+    // failed-attempt check. Lead-out heading is deliberately NOT required
+    // here at all — an aborted maneuver may recover onto roughly its
+    // original course rather than completing the turn, so there may be no
+    // meaningful "lead-out" signal to check in the first place. Qualification
+    // (duration/heading-change accumulated) is always judged against the
+    // last reliably-consistent point (preBreakIdx = breakIdx-1) regardless
+    // of break kind — only the REPORTED/rendered extent of the attempt
+    // (attemptEndIdx) differs between curvature (inclusive) and speed
+    // (exclusive).
+    const preBreakIdx = breakIdx - 1;
+    if(preBreakIdx < rangeStart) return null; // broke immediately — not even a real attempt
+    const timeSinceLeadIn = points[breakIdx].t - points[rangeStart].t;
+    const headingChangeSoFar = Math.abs(headingDiff(derived[preBreakIdx].heading, leadInHeading));
+
+    if(timeSinceLeadIn >= 2 && headingChangeSoFar >= 10){
+      const attemptEndIdx = breakKind === 'curvature' ? breakIdx : preBreakIdx;
+      return { type: failType, breakIdx, breakKind, preBreakIdx, attemptEndIdx, transitionStart: rangeStart, transitionEnd: rangeEnd, expectedCurvatureSign };
+    }
+
+    return null;
+  }
+
+  // Loosened success path, tacks only: real tacks are often fast, and the
+  // strict curvature-consistency scan can be thrown off by momentary noise
+  // (e.g. hanging near head-to-wind) even when the maneuver clearly
+  // succeeded by every other measure. If the standard curvature-based
+  // check doesn't already call it a success, this can still upgrade the
+  // result to 'tack' if: the net heading change clears the same 60° bar,
+  // the TOTAL time spent at or below the low-speed threshold is under
+  // looseTackMaxStallTime (a brief stall or sail-drop mid-tack is normal
+  // and shouldn't by itself disqualify an otherwise-real tack — but
+  // extended low speed still should, so this is a cap, not a free pass; a
+  // genuine gap is already guaranteed absent by the caller, which only
+  // reaches here after scanForCrash comes back clean), the whole thing
+  // took under looseTackMaxDuration, and lead-out ends up on the upwind
+  // half of the compass — closer to the wind direction than to dead
+  // downwind.
+  function checkLooseTackSuccess(transitionStart, transitionEnd, windDirection){
+    const dIn = derived[transitionStart], dOut = derived[transitionEnd];
+    if(!dIn || !dOut) return false;
+
+    const totalHeadingChange = Math.abs(headingDiff(dOut.heading, dIn.heading));
+    if(totalHeadingChange < 60) return false;
+
+    const lowSpeedT = parseFloat(runLowSpeedThreshInput.value);
+    const maxStallTime = parseFloat(looseTackMaxStallTimeInput.value) || 0;
+    let stallTime = 0;
+    for(let i=transitionStart+1; i<=transitionEnd; i++){
+      const d = derived[i];
+      if(!d) return false; // missing data entirely still disqualifies
+      if(d.speed <= lowSpeedT) stallTime += points[i].t - points[i-1].t;
+    }
+    if(stallTime > maxStallTime) return false;
+
+    const duration = points[transitionEnd].t - points[transitionStart].t;
+    if(duration >= (parseFloat(looseTackMaxDurationInput.value) || 0)) return false;
+
+    // No requirement on exit heading at all — a single instantaneous
+    // heading reading can be noisy, especially coming out of a stall or
+    // sail-drop. Instead: entry heading must itself be upwind-ish (that's
+    // what makes this tack-shaped to begin with — has to start from a
+    // close-hauled-ish course), the crossing must be genuine (entry and
+    // exit on opposite sides of the wind axis), and — the real test of
+    // whether this was a successful tack — the boat's actual NET
+    // displacement over the whole maneuver must have a positive component
+    // toward the wind. Drawing a vector from the entry point to the exit
+    // point and checking it points at least partly upwind is a direct
+    // physical measurement of "did we actually make upwind progress,"
+    // unaffected by how noisy any single heading sample was.
+    const relIn = headingDiff(dIn.heading, windDirection);
+    if(Math.abs(relIn) >= 90) return false; // entry itself must be upwind-ish
+
+    const relOut = headingDiff(dOut.heading, windDirection);
+    if(relIn === 0 || relOut === 0 || Math.sign(relIn) === Math.sign(relOut)) return false; // never crossed the pole
+
+    const pIn = points[transitionStart], pOut = points[transitionEnd];
+    const dx = pOut.x - pIn.x, dy = pOut.y - pIn.y;
+    const windRad = windDirection * Math.PI/180;
+    const upwindProgress = dx*Math.sin(windRad) + dy*Math.cos(windRad); // dot product with the upwind unit vector
+    if(upwindProgress <= 0) return false;
+
+    return true;
+  }
+
+  function classifyTransition(runA, runB, windDirection){
+    const transitionStart = runA.endIdx;
+    const transitionEnd = runB.startIdx;
+
+    const crashIdx = scanForCrash(transitionStart, transitionEnd);
+
+    if(crashIdx === null){
+      // no crash anywhere in this zone — evaluate normally across the
+      // whole thing, success allowed
+      if(windDirection == null) return [];
+      const downwindDir = (windDirection + 180) % 360;
+      const jibe = classifyPoleInRange(transitionStart, transitionEnd, downwindDir, 'jibe', 'failed_jibe', true);
+      if(jibe) return [jibe];
+      const tack = classifyPoleInRange(transitionStart, transitionEnd, windDirection, 'tack', 'failed_tack', true);
+      if(tack && tack.type === 'tack') return [tack];
+      if(checkLooseTackSuccess(transitionStart, transitionEnd, windDirection)){
+        return [{ type: 'tack', transitionStart, transitionEnd }];
+      }
+      if(tack) return [tack]; // failed_tack stands — no loose-success upgrade available
+      return [];
+    }
+
+    // a crash was found. Whatever's strictly before it may still qualify
+    // as a failed attempt (evaluated with allowSuccess=false, since the
+    // crash cuts off any real lead-out); the crash edge onward is always
+    // crash_recovery regardless of what came before it.
+    const results = [];
+    const preCrashEnd = crashIdx - 1;
+    if(preCrashEnd > transitionStart && windDirection != null){
+      const downwindDir = (windDirection + 180) % 360;
+      const attempt = classifyPoleInRange(transitionStart, preCrashEnd, downwindDir, 'jibe', 'failed_jibe', false)
+                    || classifyPoleInRange(transitionStart, preCrashEnd, windDirection, 'tack', 'failed_tack', false);
+      if(attempt) results.push(attempt);
+    }
+    // The crash EDGE itself (from crashIdx-1 to crashIdx, the one with the
+    // abnormal dt) is part of the crash — not just its endpoint onward — so
+    // the marking starts at crashIdx-1. This is always >= transitionStart
+    // in practice: the edge ENDING at transitionStart is run A's own last
+    // validated edge (it already passed the gap check as part of run A's
+    // own extension), so scanForCrash can never find its first hit there.
+    results.push({ type: 'crash_recovery', transitionStart: crashIdx - 1, transitionEnd });
+    return results;
+  }
+
+  function computeTransitions(windDirection){
+    const out = [];
+    for(let i=0;i<currentRuns.length-1;i++){
+      const cs = classifyTransition(currentRuns[i], currentRuns[i+1], windDirection);
+      cs.forEach(c => out.push(c));
+    }
+    // "Through" the wind: the last vertex still on the original side, just
+    // before heading crosses the relevant pole (downwind for a jibe or
+    // failed jibe, upwind for a tack or failed tack) — computed as a
+    // post-processing pass here rather than inside
+    // classifyTransition/classifyPoleInRange, so the delicate
+    // success/failure classification logic itself stays untouched. null
+    // for a failed attempt that broke off before the heading ever
+    // actually swung past its pole.
+    if(windDirection != null){
+      out.forEach(tr=>{
+        if(tr.type==='jibe' || tr.type==='failed_jibe' || tr.type==='tack' || tr.type==='failed_tack'){
+          const isFullLength = tr.type==='jibe' || tr.type==='tack';
+          const endIdx = isFullLength ? tr.transitionEnd : tr.attemptEndIdx;
+          const pole = (tr.type==='jibe'||tr.type==='failed_jibe') ? (windDirection+180)%360 : windDirection;
+          tr.throughIdx = findThroughIdx(tr.transitionStart, endIdx, pole);
+        }
+      });
+    }
+    // Min/max speed vertices within each jibe/tack (or failed attempt) —
+    // independent of wind direction, so computed regardless of whether
+    // one is set (unlike throughIdx above, which needs a pole to cross).
+    // Used for map marking; computeSegmentStats does its own independent
+    // scan for the currently-selected segment specifically.
+    out.forEach(tr=>{
+      if(tr.type==='jibe' || tr.type==='failed_jibe' || tr.type==='tack' || tr.type==='failed_tack'){
+        const isFullLength = tr.type==='jibe' || tr.type==='tack';
+        const endIdx = isFullLength ? tr.transitionEnd : tr.attemptEndIdx;
+        let minSpeed = Infinity, minIdx = null, maxSpeed = -Infinity, maxIdx = null;
+        for(let i=tr.transitionStart+1;i<=endIdx;i++){
+          const d = derived[i];
+          if(!d) continue;
+          if(d.speed < minSpeed){ minSpeed = d.speed; minIdx = i; }
+          if(d.speed > maxSpeed){ maxSpeed = d.speed; maxIdx = i; }
+        }
+        tr.minSpeedIdx = minIdx;
+        tr.maxSpeedIdx = maxIdx;
+      }
+    });
+    return out;
+  }
+
+
+  // ---------- UI wiring ----------
+  function buildUI(){
+    slider.min = 0;
+    slider.max = points.length - 1;
+    slider.value = selected;
+  }
+
+  function formatHHMM(seconds){
+    if(seconds == null || !Number.isFinite(seconds)) return '—';
+    const totalMin = Math.round(seconds/60);
+    const hh = Math.floor(totalMin/60);
+    const mm = totalMin%60;
+    return String(hh).padStart(2,'0')+':'+String(mm).padStart(2,'0');
+  }
+
+  function updateStatsBar(){
+    // Reuses currentRuns/currentWindEstimate/currentTransitions — already
+    // computed once at the top of redrawAll, which always calls this.
+    // Recomputing them again here independently was the source of a real
+    // bug: this function used to run once, early, from buildUI — before
+    // the wind direction textbox had been initialized from the calculated
+    // estimate — so its own from-scratch computeTransitions(windDir) call
+    // saw windDir=null and classified zero jibes/tacks, and since nothing
+    // ever called this function again afterward, the stats bar stayed
+    // wrong for the rest of the session. Folding this into redrawAll (so
+    // it can never go stale relative to any other redraw) and reading the
+    // shared state instead of recomputing it fixes both the staleness and
+    // the redundant duplicate computation in one move.
+    const dur = points[points.length-1].t;
+    const jibeCount = currentTransitions.filter(t=>t.type==='jibe').length;
+    const failedJibeCount = currentTransitions.filter(t=>t.type==='failed_jibe').length;
+    const tackCount = currentTransitions.filter(t=>t.type==='tack').length;
+    const failedTackCount = currentTransitions.filter(t=>t.type==='failed_tack').length;
+    const crashCount = currentTransitions.filter(t=>t.type==='crash_recovery').length;
+    const runDur = currentRuns.reduce((a,r)=>a+r.duration,0);
+
+    // Session duration: start of the first run to end of the last run —
+    // the actual sailing session, trimmed of any warm-up, breaks, or dead
+    // time before/after it. Used both for its own display and as the
+    // denominator for "% of session time" below — a run-time percentage
+    // relative to the full track's own duration would be diluted by
+    // exactly that dead time, understating how much of the SESSION itself
+    // was spent actually running.
+    const sessionDur = currentRuns.length > 0
+      ? (currentRuns[currentRuns.length-1].endT - currentRuns[0].startT)
+      : 0;
+    const sessionTime = currentRuns.length > 0 ? formatHHMM(sessionDur) : '—';
+    const runPct = sessionDur>0 ? (runDur/sessionDur*100) : 0;
+
+    // Speed restricted to edges that are part of a run, a jibe, or a
+    // tack — deliberately excludes failed attempts, crash/recovery, and
+    // anything unclassified, so a stall or a gap-triggered crash edge
+    // can't inflate (or corrupt) the reported maximum.
+    const derivedSpeeds = [], deviceSpeeds = [];
+    function collectSpeedRange(startIdx, endIdx){
+      for(let i=startIdx+1; i<=endIdx; i++){
+        const d = derived[i];
+        if(d && d.speed != null) derivedSpeeds.push(d.speed);
+        const rs = points[i].rawSpeed;
+        if(rs != null && !Number.isNaN(rs)) deviceSpeeds.push(rs);
+      }
+    }
+    currentRuns.forEach(run => collectSpeedRange(run.startIdx, run.endIdx));
+    currentTransitions.forEach(tr => {
+      if(tr.type === 'jibe' || tr.type === 'tack') collectSpeedRange(tr.transitionStart, tr.transitionEnd);
+    });
+    const derivedMaxSpeed = derivedSpeeds.length ? Math.max(...derivedSpeeds) : null;
+    const deviceMaxSpeed = deviceSpeeds.length ? Math.max(...deviceSpeeds) : null;
+
+    statsBar.innerHTML = `
+      <span><b>${points.length}</b> points</span>
+      <span><b>${formatHHMM(dur)}</b> duration</span>
+      <span><b>${baseDtMs!=null ? baseDtMs+'ms' : '?'}</b> sampling${dtMaxVar!=null && baseDtMs!=null && dtMaxVar!==baseDtMs ? ` (<b style="color:var(--warn)">variable, gap threshold ${dtMaxVar+baseDtMs}ms</b>)` : ''}</span>
+      <span style="flex-basis:100%; height:0;"></span>
+      <span style="color:var(--dim); margin-left:2px;">Processed:</span>
+      <span><b>${sessionTime}</b> session duration</span>
+      <span><b style="color:var(--good)">${currentRuns.length}</b> runs (<b style="color:var(--good)">${runPct.toFixed(0)}%</b> of session time)</span>
+      <span><b style="color:#c77dff">${jibeCount}</b> jibes, <b style="color:#ff9d4d">${failedJibeCount}</b> failed</span>
+      <span><b style="color:#2dd4bf">${tackCount}</b> tacks, <b style="color:#ff5d9e">${failedTackCount}</b> failed</span>
+      <span><b style="color:#8a5a5a">${crashCount}</b> crash/recovery</span>
+      <span><b>${derivedMaxSpeed!=null ? formatSpeed(derivedMaxSpeed) : '—'}</b> max derived${deviceMaxSpeed!=null ? ` / <b>${formatSpeed(deviceMaxSpeed)}</b> max device` : ''}</span>
+      <span>${hasDeviceSpeed ? '<b style="color:var(--good)">device speed present</b>' : '<span style="color:var(--dim)">no device speed field</span>'}</span>
+    `;
+  }
+
+  slider.addEventListener('input', ()=>{ selected = parseInt(slider.value,10); redrawAll(); });
+  // Press-and-hold on prev/next: fires once immediately on press, then
+  // repeats every REPEAT_INTERVAL ms after an initial REPEAT_DELAY ms of
+  // continuing to hold, until released — replacing plain click handlers
+  // for mouse/touch entirely so there's no double-fire between a "tap"
+  // and a "press". Pointer events unify mouse and touch here without
+  // needing separate handlers for each. A 'click' handler is still kept
+  // for keyboard activation (Enter/Space on a focused button fires click
+  // without any preceding pointerdown), guarded by a flag so a normal
+  // mouse/touch tap — which fires pointerdown then click — doesn't fire
+  // the action twice.
+  function setupRepeatButton(btn, action){
+    const REPEAT_DELAY = 450, REPEAT_INTERVAL = 120;
+    let delayTimer = null, repeatTimer = null, firedByPointer = false;
+    function stop(){
+      clearTimeout(delayTimer); delayTimer = null;
+      clearInterval(repeatTimer); repeatTimer = null;
+    }
+    btn.addEventListener('pointerdown', e=>{
+      e.preventDefault();
+      stop(); // guard against a stray double pointerdown without an intervening up
+      firedByPointer = true;
+      action();
+      delayTimer = setTimeout(()=>{
+        repeatTimer = setInterval(action, REPEAT_INTERVAL);
+      }, REPEAT_DELAY);
+    });
+    btn.addEventListener('pointerup', stop);
+    btn.addEventListener('pointercancel', stop);
+    btn.addEventListener('pointerleave', stop);
+    btn.addEventListener('contextmenu', e=>e.preventDefault()); // backstop against the mobile long-press callout/menu
+    btn.addEventListener('click', ()=>{
+      if(firedByPointer){ firedByPointer = false; return; } // already handled via pointerdown
+      action(); // genuine keyboard (Enter/Space) activation — no pointer event preceded this
+    });
+  }
+  setupRepeatButton(el('prevBtn'), ()=> step(-1));
+  setupRepeatButton(el('nextBtn'), ()=> step(1));
+  el('resetViewBtn').addEventListener('click', ()=>{
+    mapZoom = { scale: 1, panX: 0, panY: 0 };
+    timeView = { tMin: fullTRange.tMin, tMax: fullTRange.tMax };
+    redrawAll();
+  });
+  el('restoreBtn').addEventListener('click', ()=>{
+    if(lastLoadedText) loadFromText(lastLoadedText, false);
+  });
+  el('saveAsBtn').addEventListener('click', exportGPX);
+  el('dedupeBtn').addEventListener('click', ()=> removeDuplicateCoordPoints(false));
+
+  function removeDuplicateCoordPoints(silent){
+    if(!points.length) return;
+
+    // Scan for runs of consecutive points sharing identical (lat, lon).
+    // These typically come from a device re-logging the same fix across
+    // several timestamps (a "stutter") rather than real stationary motion —
+    // real stationary drift still has tiny position noise; an exact repeat
+    // is a data artifact.
+    //
+    // Same balance principle as dedupeTimestamps above, transposed: there,
+    // position varied within a run sharing one timestamp, so the balance
+    // metric was distance; here, time varies within a run sharing one
+    // position, so the balance metric is time. Rather than arbitrarily
+    // keeping the run's first (earliest) point, keep whichever ONE point
+    // minimizes the difference between the time gap immediately BEFORE it
+    // (from the nearest already-kept point) and the time gap immediately
+    // AFTER it (to the next distinct-position point) — the point that
+    // best preserves a smooth, consistent time step through this
+    // stutter, rather than risking an arbitrary pick that leaves a large
+    // time jump on one side and a tiny one on the other. Letting the
+    // resulting wider gap be handled by the normal gap-shading (and our
+    // variable-dt-tolerant kinematics) instead of producing a fake
+    // zero-velocity segment.
+    const keepIdx = [];
+    let removedCount = 0;
+    let i = 0;
+    while(i < points.length){
+      let j = i+1;
+      while(j < points.length && points[j].lat === points[i].lat && points[j].lon === points[i].lon) j++;
+      if(j - i === 1){
+        keepIdx.push(i);
+      } else {
+        const prevIdx = keepIdx.length > 0 ? keepIdx[keepIdx.length-1] : null;
+        const nextIdx = j < points.length ? j : null;
+        let bestK = i, bestDiff = Infinity;
+        for(let k=i; k<j; k++){
+          const dtBefore = prevIdx != null ? points[k].time.getTime() - points[prevIdx].time.getTime() : 0;
+          const dtAfter = nextIdx != null ? points[nextIdx].time.getTime() - points[k].time.getTime() : 0;
+          const diff = Math.abs(dtBefore - dtAfter);
+          if(diff < bestDiff){ bestDiff = diff; bestK = k; }
+        }
+        keepIdx.push(bestK);
+      }
+      removedCount += (j - i - 1);
+      i = j;
+    }
+
+    if(removedCount === 0){ if(!silent) alert('No duplicate-coordinate point sequences found.'); return; }
+    if(keepIdx.length < 3){ if(!silent) alert('That would leave fewer than 3 points — aborting.'); return; }
+
+    const beforeCount = points.length;
+    const selT = points[selected] ? points[selected].t : null;
+    points = keepIdx.map(idx => points[idx]);
+    computeDerived();
+    fullTRange = { tMin: points[firstValid].t, tMax: points[lastValid].t };
+    clampTimeView();
+
+    let best = 0, bestD = Infinity;
+    if(selT != null){
+      for(let k=0;k<points.length;k++){
+        const dd = Math.abs(points[k].t - selT);
+        if(dd < bestD){ bestD = dd; best = k; }
+      }
+    }
+    selected = best;
+
+    buildUI();
+    redrawAll();
+    if(!silent) alert(`Removed ${removedCount} duplicate-coordinate point(s): ${beforeCount} \u2192 ${points.length} points. Use "restore original track" to compare against the unfiltered kinematics.`);
+  }
+
+  function suggestedExportFilename(){
+    let base = 'track';
+    if(lastLoadedFilename){
+      base = lastLoadedFilename.replace(/\.[^/.]+$/, ''); // strip extension
+    }
+    return base + '_t.gpx';
+  }
+
+  function pointsToGPX(){
+    const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+    xml += '<gpx version="1.1" creator="GPS Track Inspector" xmlns="http://www.topografix.com/GPX/1/1">\n';
+    xml += '<trk><name>' + esc(suggestedExportFilename()) + '</name><trkseg>\n';
+    points.forEach(p=>{
+      xml += `<trkpt lat="${p.lat}" lon="${p.lon}">`;
+      if(p.ele != null && !Number.isNaN(p.ele)) xml += `<ele>${p.ele}</ele>`;
+      xml += `<time>${p.time.toISOString()}</time>`;
+      if(p.rawSpeed != null && !Number.isNaN(p.rawSpeed)) xml += `<speed>${p.rawSpeed}</speed>`;
+      xml += `</trkpt>\n`;
+    });
+    xml += '</trkseg></trk></gpx>\n';
+    return xml;
+  }
+
+  function exportGPX(){
+    if(!points.length){ alert('No track loaded.'); return; }
+    const xml = pointsToGPX();
+    const blob = new Blob([xml], {type:'application/gpx+xml'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = suggestedExportFilename();
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function ensureVisible(i){
+    const t = points[i].t;
+    if(!timeView) return;
+    const span = timeView.tMax - timeView.tMin;
+    if(t < timeView.tMin || t > timeView.tMax){
+      timeView = { tMin: t - span/2, tMax: t + span/2 };
+      clampTimeView();
+    }
+  }
+  function ensureVisibleOnMap(i){
+    if(!mapView) return; // map hasn't drawn yet
+    const p = points[i];
+    const X = mapView.sx(p.x), Y = mapView.sy(p.y);
+    if(X < 0 || X > mapView.w || Y < 0 || Y > mapView.h){
+      // Recenter on the point — same "re-center, don't just nudge into
+      // view" behavior as the time charts' ensureVisible above. Zoom level
+      // (mapZoom.scale) is left untouched, only pan changes.
+      mapZoom.panX = p.x - mapView.cx0;
+      mapZoom.panY = p.y - mapView.cy0;
+    }
+  }
+  function clampTimeView(){
+    const full = fullTRange.tMax - fullTRange.tMin;
+    let span = timeView.tMax - timeView.tMin;
+    if(span > full){ timeView.tMin = fullTRange.tMin; timeView.tMax = fullTRange.tMax; return; }
+    if(timeView.tMin < fullTRange.tMin){ timeView.tMin = fullTRange.tMin; timeView.tMax = timeView.tMin + span; }
+    if(timeView.tMax > fullTRange.tMax){ timeView.tMax = fullTRange.tMax; timeView.tMin = timeView.tMax - span; }
+  }
+  [runCurvThreshInput, runBreakHeadingThreshInput, runNarrowHeadingThreshInput, runMinSecInput, runMinDurationInput, runLowSpeedThreshInput, runDeviceDisagreeThreshInput, runTailSampleEdgesInput, reconnectAngleInput, looseTackMaxDurationInput, looseTackMaxStallTimeInput].forEach(inp=>{
+    inp.addEventListener('input', ()=>{ redrawAll(); });
+  });
+
+  function step(dir){
+    selected = Math.max(0, Math.min(points.length-1, selected+dir));
+    slider.value = selected;
+    ensureVisible(selected);
+    ensureVisibleOnMap(selected);
+    redrawAll();
+  }
+
+  document.addEventListener('keydown', e=>{
+    if(mainLayout.style.display === 'none') return;
+    // Skip when a form control has focus — a <select> (like the speed
+    // unit dropdown) natively responds to arrow keys to cycle its own
+    // options, and without this guard both this global handler AND the
+    // focused control would react to the same keypress: stepping through
+    // the track while simultaneously changing whatever dropdown happened
+    // to be focused. Same reasoning for text inputs (editing a threshold
+    // value shouldn't also step the track) and textareas.
+    const activeTag = document.activeElement && document.activeElement.tagName;
+    if(activeTag === 'SELECT' || activeTag === 'INPUT' || activeTag === 'TEXTAREA') return;
+    if(e.key === 'ArrowRight'){ step(1); }
+    if(e.key === 'ArrowLeft'){ step(-1); }
+  });
+
+  // ---------- rendering helpers ----------
+  function fitCanvasToCSS(canvas){
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(200, rect.width);
+    let h = canvas.height / canvas.width * w; // keep declared aspect ratio
+    // Respect any CSS max-height constraint. Without this, a canvas with
+    // max-height set would still get its drawing buffer sized for the full
+    // aspect-ratio-derived height below — since canvas.style.height and the
+    // buffer dimensions are set unconditionally either way, the result
+    // would be the bottom portion of the drawing cropped off by the CSS
+    // constraint, not a proportionally scaled-down render.
+    const maxH = parseFloat(getComputedStyle(canvas).maxHeight);
+    if(Number.isFinite(maxH) && maxH > 0 && h > maxH) h = maxH;
+    canvas.width = w*dpr;
+    canvas.height = h*dpr;
+    canvas.style.height = h+'px';
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    return {ctx, w, h};
+  }
+
+  function makeScale(domainMin, domainMax, rangeMin, rangeMax){
+    const dd = (domainMax-domainMin) || 1;
+    return v => rangeMin + (v-domainMin)/dd * (rangeMax-rangeMin);
+  }
+
+  // ---------- draw: track map ----------
+  let mapView = null; // cache scales for click-to-select
+  // ---------- wind rose rendering ----------
+  function drawWindRose(){
+    const ctx = windRoseCanvas.getContext('2d');
+    const w = windRoseCanvas.width, h = windRoseCanvas.height;
+    ctx.clearRect(0,0,w,h);
+    const cx = w/2, cy = h/2, maxR = Math.min(w,h)/2 - 30;
+
+    const est = currentWindEstimate;
+    const manualDir = getManualWindDirection();
+    windUndeterminedMsg.textContent = manualDir == null ? 'undetermined — please set manually' : '';
+
+    // compass rings + N/E/S/W labels, drawn regardless of data availability
+    ctx.strokeStyle = '#2a3138';
+    ctx.lineWidth = 1;
+    [0.33,0.66,1.0].forEach(f=>{
+      ctx.beginPath(); ctx.arc(cx,cy,maxR*f,0,Math.PI*2); ctx.stroke();
+    });
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.fillStyle = '#8a95a1';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('N', cx, cy-maxR-12);
+    ctx.fillText('S', cx, cy+maxR+12);
+    ctx.fillText('E', cx+maxR+12, cy);
+    ctx.fillText('W', cx-maxR-12, cy);
+
+    if(!est || est.totalDist <= 0){
+      ctx.fillStyle = '#8a95a1';
+      ctx.fillText('no wind estimate', cx, cy);
+      return;
+    }
+
+    const toXY = (headingDeg, r) => {
+      const rad = headingDeg * Math.PI/180;
+      return [cx + r*Math.sin(rad), cy - r*Math.cos(rad)];
+    };
+
+    const maxBin = Math.max(...est.bins);
+
+    // distance-weighted histogram wedges — always drawable once we have bins
+    if(maxBin > 0){
+      for(let i=0;i<WIND_NUM_BINS;i++){
+        const val = est.bins[i];
+        if(val <= 0) continue;
+        const r = (val / maxBin) * maxR;
+        const a0 = i*WIND_BIN_DEG, a1 = (i+1)*WIND_BIN_DEG;
+        const [x0,y0] = toXY(a0, r);
+        ctx.beginPath();
+        ctx.moveTo(cx,cy);
+        ctx.lineTo(x0,y0);
+        const steps = 3;
+        for(let s=1;s<=steps;s++){
+          const a = a0 + (a1-a0)*s/steps;
+          const [x,y] = toXY(a, r);
+          ctx.lineTo(x,y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(79,179,255,0.55)';
+        ctx.fill();
+      }
+    }
+
+    // Split axis — the actual boundary between bucket A and bucket B, drawn
+    // as a thin grey line at both the axis and its antipode (it's a full
+    // diameter, splitting the whole compass in two). When overriding, this
+    // follows the manual wind direction instead of the calculated split —
+    // see redrawAll's isOverriding logic.
+    const splitAxis = currentOverrideBuckets ? currentOverrideBuckets.splitAxis : est.splitAxis;
+    if(splitAxis != null){
+      ctx.strokeStyle = 'rgba(140,150,160,0.5)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2,3]);
+      const [ax1,ay1] = toXY(splitAxis, maxR);
+      const [ax2,ay2] = toXY(splitAxis+180, maxR);
+      ctx.beginPath(); ctx.moveTo(ax1,ay1); ctx.lineTo(ax2,ay2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Gold lines: each bucket's own distance-weighted MEDIAN heading —
+    // the same per-bucket average that gets bisected into the purple
+    // wind axis below, shown individually here rather than only as their
+    // combined bisector. When overriding, these are recomputed for the
+    // manual split (see redrawAll) rather than the calculated one. Each
+    // is labeled with how far its heading sits off the wind axis (the
+    // smaller of the two angles to the axis line, so 0° means sailing
+    // exactly along it — dead upwind or downwind — and 90° means a beam
+    // reach, exactly perpendicular to it).
+    const bucketA = currentOverrideBuckets ? currentOverrideBuckets.bucketA : est.bucketA;
+    const bucketB = currentOverrideBuckets ? currentOverrideBuckets.bucketB : est.bucketB;
+    // Wind axis rotates with the effective (manual textbox) wind
+    // direction whenever one is set, so a manual override is reflected
+    // here too — not just in the mini rose — rather than staying frozen
+    // on the original calculation. Falls back to the calculated axis only
+    // when the textbox is blank, so there's still something useful to
+    // show even with nothing currently in use.
+    const windAxis = manualDir != null ? manualDir : est.refinedAxis;
+    if(bucketA && bucketB){
+      ctx.strokeStyle = 'rgba(224,195,79,0.6)';
+      ctx.lineWidth = 1.5;
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(224,195,79,0.9)';
+      [bucketA.avgHeading, bucketB.avgHeading].forEach(h=>{
+        const [x,y] = toXY(h, maxR);
+        ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke();
+        if(windAxis != null){
+          const [lx,ly] = toXY(h, maxR + 12);
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(angleDiff180(h, windAxis).toFixed(0) + '°', lx, ly);
+        }
+      });
+    }
+
+    // each bucket's own top-speed vector, same off-wind-angle labeling as
+    // the medians above
+    if(bucketA && bucketB){
+      ctx.strokeStyle = '#3ecf8e';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4,3]);
+      ctx.fillStyle = 'rgba(62,207,142,0.9)';
+      ctx.font = '10px system-ui, sans-serif';
+      [bucketA, bucketB].forEach(b=>{
+        const [sx,sy] = toXY(b.topSpeedAngle, maxR*0.9);
+        ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(sx,sy); ctx.stroke();
+        if(windAxis != null){
+          const [lx,ly] = toXY(b.topSpeedAngle, maxR*0.9 + 12);
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          // Direct angle to the wind direction pole specifically (0-180°),
+          // not the axis-relative measure medians use (0-90°) — top-speed
+          // sailing is almost always near downwind, so this should read
+          // close to 180° (nearly opposite the wind), not folded into a
+          // smaller "off axis" number the way medians' own labels are.
+          ctx.fillText(angleDiff180(b.topSpeedAngle, windAxis).toFixed(0) + '°', lx, ly);
+        }
+      });
+      ctx.setLineDash([]);
+    }
+
+    // wind axis — bisector of the two gold headings above (or the manual
+    // override — see windAxis above). Drawn as a full line across the
+    // whole diagram, not a ray: it's an axis (no inherent direction),
+    // same reasoning as the split axis above.
+    if(windAxis != null){
+      ctx.strokeStyle = '#c77dff';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([1,4]);
+      ctx.lineCap = 'round';
+      const [rx1,ry1] = toXY(windAxis, maxR);
+      const [rx2,ry2] = toXY(windAxis+180, maxR);
+      ctx.beginPath(); ctx.moveTo(rx1,ry1); ctx.lineTo(rx2,ry2); ctx.stroke();
+      // perpendicular axis (beam-reach reference), same style, rotated 90° —
+      // matches the mini rose's own addition of this line
+      const [px1,py1] = toXY(windAxis+90, maxR);
+      const [px2,py2] = toXY(windAxis+270, maxR);
+      ctx.beginPath(); ctx.moveTo(px1,py1); ctx.lineTo(px2,py2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.lineCap = 'butt';
+    }
+
+    // final wind direction marker — the EFFECTIVE (manual textbox) value,
+    // not necessarily the calculated one, since that's what's actually
+    // driving transition classification elsewhere. Same off-wind-angle
+    // label as the others — will read 0° whenever manualDir is itself
+    // what windAxis was derived from (the common case), which is exactly
+    // the point: it confirms the ray sits exactly on the axis rather than
+    // leaving that as an assumption.
+    if(manualDir != null){
+      const [wx,wy] = toXY(manualDir, maxR);
+      ctx.strokeStyle = '#ff5d5d';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(wx,wy); ctx.stroke();
+      ctx.fillStyle = '#ff5d5d';
+      ctx.beginPath(); ctx.arc(wx,wy,4,0,Math.PI*2); ctx.fill();
+      if(windAxis != null){
+        const [lx,ly] = toXY(manualDir, maxR + 12);
+        ctx.font = '10px system-ui, sans-serif';
+        ctx.fillStyle = 'rgba(255,93,93,0.9)';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('0°', lx, ly);
+      }
+    }
+  }
+
+  // An edge's speed is excluded from gradient coloring (and gradient-range
+  // computation) if it isn't trustworthy: a true dt gap (edgeGapFails —
+  // GPS dropout, the derived speed there is a gap-spanning average, not a
+  // real instantaneous reading), or a derived/device speed disagreement (the
+  // same check computeRuns uses to break runs — if the two don't trust
+  // each other, neither does this). Shared between drawMap (which draws
+  // per-edge colors) and updateTrackLegend (which needs the same
+  // reasoning to describe what "excluded" means there).
+  function edgeGradientExcluded(i){
+    const d = derived[i];
+    if(!d) return true;
+    if(edgeGapFails(i)) return true;
+    const p = points[i];
+    const deviceDisagreeT = parseFloat(runDeviceDisagreeThreshInput.value);
+    if(p.rawSpeed != null && !Number.isNaN(p.rawSpeed) && (d.speed - p.rawSpeed) >= deviceDisagreeT) return true;
+    return false;
+  }
+  function speedToColor(speed, minSpeed, maxSpeed){
+    const t = maxSpeed > minSpeed ? Math.max(0, Math.min(1, (speed-minSpeed)/(maxSpeed-minSpeed))) : 0.5;
+    const hue = 240 - 240*t; // 240=blue (slow) -> 0=red (fast)
+    return `hsl(${hue}, 80%, 50%)`;
+  }
+
+  function drawMap(){
+    const {ctx, w, h} = fitCanvasToCSS(mapCanvas);
+    ctx.clearRect(0,0,w,h);
+    const pad = 24;
+
+    const xs = points.map(p=>p.x), ys = points.map(p=>p.y);
+    const xMin=Math.min(...xs), xMax=Math.max(...xs);
+    const yMin=Math.min(...ys), yMax=Math.max(...ys);
+    const spanX = xMax-xMin || 1, spanY = yMax-yMin || 1;
+    const baseScale = Math.min((w-2*pad)/spanX, (h-2*pad)/spanY);
+    const scale = baseScale * mapZoom.scale;
+
+    const cx0 = (xMin+xMax)/2, cy0=(yMin+yMax)/2;
+    const centerX = cx0 + mapZoom.panX, centerY = cy0 + mapZoom.panY;
+    const sx = v => w/2 + (v-centerX)*scale;
+    const sy = v => h/2 - (v-centerY)*scale; // north up
+
+    mapView = {sx, sy, scale, baseScale, centerX, centerY, cx0, cy0, w, h};
+
+    if(showMapBackground){
+      drawOsmBackground(ctx, sx, sy, w, h, scale, centerX, centerY);
+    }
+
+    // path
+    ctx.strokeStyle = '#3a4552';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    points.forEach((p,i)=>{
+      const X=sx(p.x), Y=sy(p.y);
+      if(i===0) ctx.moveTo(X,Y); else ctx.lineTo(X,Y);
+    });
+    ctx.stroke();
+
+    // Edge coloring: 'type' (default) colors by run/maneuver classification,
+    // as below. 'speed' colors each eligible edge individually by its own
+    // speed instead — a gradient from blue (slow) to red (fast) — EXCEPT
+    // edges whose speed value isn't trustworthy or isn't part of any
+    // classification at all, which stay the plain grey base path
+    // regardless of mode: a true dt gap (edgeGapFails — GPS dropout, the
+    // derived speed there is a gap-spanning average, not a real
+    // instantaneous reading), a derived/device speed disagreement (the same
+    // check computeRuns uses to break runs — if the two don't trust each
+    // other, neither does this), a crash/recovery zone specifically (real
+    // motion, but not ordinary sailing speed), or an edge outside any run
+    // or transition at all (never classified one way or the other).
+    let speedMin = 0, speedMax = 1;
+    if(edgeColorMode === 'speed'){
+      const eligibleSpeeds = [];
+      currentRuns.forEach(run=>{
+        for(let i=run.startIdx+1;i<=run.endIdx;i++){
+          if(!edgeGradientExcluded(i)) eligibleSpeeds.push(derived[i].speed);
+        }
+      });
+      currentTransitions.forEach(tr=>{
+        if(tr.type === 'crash_recovery') return; // never eligible, regardless of speed
+        const isFullLength = tr.type === 'jibe' || tr.type === 'tack';
+        const endIdx = isFullLength ? tr.transitionEnd : tr.attemptEndIdx;
+        for(let i=tr.transitionStart+1;i<=endIdx;i++){
+          if(!edgeGradientExcluded(i)) eligibleSpeeds.push(derived[i].speed);
+        }
+      });
+      if(eligibleSpeeds.length > 0){
+        speedMin = Math.min(...eligibleSpeeds);
+        speedMax = Math.max(...eligibleSpeeds);
+      }
+      currentSpeedGradientRange = {min: speedMin, max: speedMax};
+    }
+
+    // run edges: highlighted line for continuity, plus a small dot at every
+    // point so individual edge endpoints stay visible. In speed mode, drawn
+    // edge-by-edge (each its own color) rather than one path per run.
+    ctx.lineWidth = 2.5;
+    if(edgeColorMode === 'type'){
+      ctx.strokeStyle = '#3ecf8e';
+      ctx.fillStyle = '#3ecf8e';
+      currentRuns.forEach(run=>{
+        ctx.beginPath();
+        for(let i=run.startIdx;i<=run.endIdx;i++){
+          const X=sx(points[i].x), Y=sy(points[i].y);
+          if(i===run.startIdx) ctx.moveTo(X,Y); else ctx.lineTo(X,Y);
+        }
+        ctx.stroke();
+        for(let i=run.startIdx;i<=run.endIdx;i++){
+          const X=sx(points[i].x), Y=sy(points[i].y);
+          ctx.beginPath(); ctx.arc(X,Y,1.8,0,Math.PI*2); ctx.fill();
+        }
+      });
+    } else {
+      currentRuns.forEach(run=>{
+        for(let i=run.startIdx+1;i<=run.endIdx;i++){
+          if(edgeGradientExcluded(i)) continue; // leave the grey base path showing through
+          ctx.strokeStyle = speedToColor(derived[i].speed, speedMin, speedMax);
+          ctx.beginPath();
+          ctx.moveTo(sx(points[i-1].x), sy(points[i-1].y));
+          ctx.lineTo(sx(points[i].x), sy(points[i].y));
+          ctx.stroke();
+        }
+      });
+    }
+
+    // run breakpoints: a marker at every run's start and end. Consecutive
+    // runs can legitimately share a breakpoint — that just draws one marker
+    // at the shared position, which is correct.
+    ctx.fillStyle = '#e0c34f';
+    currentRuns.forEach(run=>{
+      [run.startIdx, run.endIdx].forEach(idx=>{
+        const X=sx(points[idx].x), Y=sy(points[idx].y);
+        ctx.beginPath(); ctx.arc(X,Y,3.5,0,Math.PI*2); ctx.fill();
+      });
+    });
+
+    // classified transitions: successful maneuver drawn full-length, failed
+    // attempt only up through where curvature broke — the rest of the
+    // transition zone is genuinely unclassified for now. In speed mode,
+    // crash_recovery always stays grey (skipped entirely); the rest draw
+    // edge-by-edge like runs above, same exclusion rules.
+    const TRANSITION_COLORS = { jibe: '#c77dff', failed_jibe: '#ff9d4d', tack: '#2dd4bf', failed_tack: '#ff5d9e', crash_recovery: '#8a5a5a' };
+    currentTransitions.forEach(tr=>{
+      const isFullLength = tr.type === 'jibe' || tr.type === 'tack' || tr.type === 'crash_recovery';
+      const endIdx = isFullLength ? tr.transitionEnd : tr.attemptEndIdx;
+      if(edgeColorMode === 'type'){
+        ctx.strokeStyle = TRANSITION_COLORS[tr.type] || '#888';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        for(let i=tr.transitionStart;i<=endIdx;i++){
+          const X=sx(points[i].x), Y=sy(points[i].y);
+          if(i===tr.transitionStart) ctx.moveTo(X,Y); else ctx.lineTo(X,Y);
+        }
+        ctx.stroke();
+      } else {
+        if(tr.type === 'crash_recovery') return; // stays grey
+        ctx.lineWidth = 3;
+        for(let i=tr.transitionStart+1;i<=endIdx;i++){
+          if(edgeGradientExcluded(i)) continue;
+          ctx.strokeStyle = speedToColor(derived[i].speed, speedMin, speedMax);
+          ctx.beginPath();
+          ctx.moveTo(sx(points[i-1].x), sy(points[i-1].y));
+          ctx.lineTo(sx(points[i].x), sy(points[i].y));
+          ctx.stroke();
+        }
+      }
+      // "Through" the wind — a dot at the last vertex still on the
+      // original side, just before heading crossed the pole this
+      // maneuver was aiming past (see findThroughIdx), colored to match
+      // the maneuver's own type color regardless of the current
+      // edge-color mode. Only drawn when a crossing was actually found —
+      // a failed attempt that broke off before ever swinging past its
+      // pole has none.
+      if(tr.throughIdx != null){
+        const X = sx(points[tr.throughIdx].x), Y = sy(points[tr.throughIdx].y);
+        ctx.fillStyle = TRANSITION_COLORS[tr.type] || '#888';
+        ctx.beginPath(); ctx.arc(X, Y, 5, 0, Math.PI*2); ctx.fill();
+      }
+      // Min/max speed vertices — thin stroked circles (not filled, to
+      // stay visually distinct from the solid through-dot), same color
+      // and same outer size.
+      [tr.minSpeedIdx, tr.maxSpeedIdx].forEach(idx=>{
+        if(idx == null) return;
+        const X = sx(points[idx].x), Y = sy(points[idx].y);
+        ctx.strokeStyle = TRANSITION_COLORS[tr.type] || '#888';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(X, Y, 7, 0, Math.PI*2); ctx.stroke();
+      });
+    });
+
+    // selected point
+    const sp = points[selected];
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(sx(sp.x), sy(sp.y), 7, 0, Math.PI*2);
+    ctx.stroke();
+
+    // Called here, not just from redrawAll — drawMap is also invoked
+    // directly from the drag/wheel/touch pan-zoom handlers, which don't go
+    // through redrawAll at all. In 'follow' mode the compass has to track
+    // the selected point's screen position through pan/zoom too, not just
+    // when the selection itself changes, so it needs to redraw every time
+    // the map does, from every call site, not just this one.
+    drawMiniRose();
+    updateTrackLegend();
+    updateSelectionInfoBox();
+  }
+
+  // Rebuilds the track legend's contents to match the current color mode.
+  // Cheap enough to call unconditionally on every drawMap — the legend
+  // container itself may well be hidden (toggled off by default), but
+  // keeping its content current regardless means it's never stale the
+  // moment someone does open it.
+  function updateTrackLegend(){
+    if(edgeColorMode === 'type'){
+      trackLegend.innerHTML = `
+        <span><span class="sw" style="background:#3a4552"></span>track path</span>
+        <span><span class="sw" style="background:#3ecf8e"></span>run edge</span>
+        <span><span class="sw" style="background:#e0c34f; border-radius:50%;"></span>run breakpoint (start/end — can be shared between runs)</span>
+        <span><span class="sw" style="background:#c77dff"></span>classified jibe</span>
+        <span><span class="sw" style="background:#ff9d4d"></span>failed jibe attempt</span>
+        <span><span class="sw" style="background:#2dd4bf"></span>classified tack</span>
+        <span><span class="sw" style="background:#ff5d9e"></span>failed tack attempt</span>
+        <span><span class="sw" style="background:#8a5a5a"></span>crash / recovery (gap-triggered)</span>
+      `;
+    } else {
+      const {min, max} = currentSpeedGradientRange;
+      // sample speedToColor at 5 stops so the bar's own gradient is built
+      // from the exact same function that colors the edges, rather than
+      // duplicating the hue formula separately and risking the two drifting apart
+      const stops = [0,0.25,0.5,0.75,1].map(t => speedToColor(min + t*(max-min), min, max)).join(', ');
+      trackLegend.innerHTML = `
+        <span><span class="sw" style="background:#3a4552"></span>excluded (gap / speed disagreement / crash / unclassified)</span>
+        <span style="display:inline-flex; align-items:center; gap:6px;">
+          <span>${formatSpeed(min)}</span>
+          <span style="width:120px; height:10px; border-radius:3px; display:inline-block; background:linear-gradient(to right, ${stops});"></span>
+          <span>${formatSpeed(max)}</span>
+        </span>
+        <span><span class="sw" style="background:#e0c34f; border-radius:50%;"></span>run breakpoint (start/end — can be shared between runs)</span>
+      `;
+    }
+  }
+
+  // Small compass overlay in the corner of the track map — just enough to
+  // orient the plotted track against the wind without needing to open the
+  // full wind-estimate panel. The map is always drawn "north up" with no
+  // rotation (see sy() in drawMap above), so N is a fixed label, never
+  // recomputed. Mirrors the main rose's own colors/conventions: purple
+  // full-line axis (both directions, no inherent direction of its own),
+  // red ray for the effective wind direction actually in use.
+  function drawMiniRose(){
+    // Position the overlay itself before drawing into it: fixed corner, or
+    // centered exactly on the selected point's current screen position.
+    // Deliberately NOT translate(-50%,-50%) on the whole wrapper — that
+    // centers the wrapper's own bounding box, which includes the text
+    // readout below the canvas, so the compass circle itself would end up
+    // sitting above the point rather than on it. The canvas sits flush
+    // with the wrapper's own top-left corner regardless of what's below
+    // it, so offsetting by half the CANVAS's own size (not the wrapper's)
+    // centers the compass circle specifically, independent of however
+    // tall or wide the readout text ends up being.
+    if(miniRoseMode === 'follow' && mapView && points[selected]){
+      const p = points[selected];
+      const X = mapView.sx(p.x), Y = mapView.sy(p.y);
+      if(X < 0 || X > mapView.w || Y < 0 || Y > mapView.h){
+        // panned/zoomed the followed point out of view — hide rather than
+        // leave it floating at a clamped or otherwise confusing position
+        miniRoseWrapper.style.display = 'none';
+        return;
+      }
+      miniRoseWrapper.style.display = '';
+      const canvasW = miniRoseCanvas.offsetWidth || 90, canvasH = miniRoseCanvas.offsetHeight || 90;
+      miniRoseWrapper.style.left = (X - canvasW/2) + 'px';
+      miniRoseWrapper.style.top = (Y - canvasH/2) + 'px';
+      miniRoseWrapper.style.transform = 'none';
+    } else {
+      miniRoseWrapper.style.display = '';
+      miniRoseWrapper.style.left = '8px';
+      miniRoseWrapper.style.top = '8px';
+      miniRoseWrapper.style.transform = 'none';
+    }
+
+    const ctx = miniRoseCanvas.getContext('2d');
+    const w = miniRoseCanvas.width, h = miniRoseCanvas.height;
+    ctx.clearRect(0,0,w,h);
+    const cx = w/2, cy = h/2, r = Math.min(w,h)/2 - 12;
+
+    const toXY = (headingDeg, radius) => {
+      const rad = headingDeg * Math.PI/180;
+      return [cx + radius*Math.sin(rad), cy - radius*Math.cos(rad)];
+    };
+
+    // translucent backdrop so the lines stay legible over any part of the track
+    ctx.fillStyle = 'rgba(15,18,22,0.7)';
+    ctx.beginPath(); ctx.arc(cx,cy,r+10,0,Math.PI*2); ctx.fill();
+    const ringColor = 'rgba(140,150,160,0.5)';
+    ctx.strokeStyle = ringColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
+
+    // north indicator: thin line + dot, same grey as the ring (map is
+    // always drawn north-up, no rotation, so this is a fixed direction)
+    ctx.strokeStyle = ringColor;
+    ctx.lineWidth = 1;
+    const [nx,ny] = toXY(0, r);
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(nx,ny); ctx.stroke();
+    ctx.fillStyle = ringColor;
+    ctx.beginPath(); ctx.arc(nx,ny,2.5,0,Math.PI*2); ctx.fill();
+
+    ctx.font = '10px system-ui, sans-serif';
+    ctx.fillStyle = '#8a95a1';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('N', cx, cy-r-8);
+
+    // Wind axis is derived from the EFFECTIVE (manual textbox) wind
+    // direction, not the calculated est.refinedAxis directly — so it's
+    // still shown, and correctly rotates, even when the calculation is
+    // undetermined and the user has set (or overridden) the direction
+    // manually. In the common case where nothing's been overridden,
+    // manualDir is itself just initialized from the calculated value, so
+    // this makes no visible difference there.
+    const manualDir = getManualWindDirection();
+    if(manualDir != null){
+      ctx.strokeStyle = '#c77dff';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([1,3]);
+      const [ax1,ay1] = toXY(manualDir, r);
+      const [ax2,ay2] = toXY(manualDir+180, r);
+      ctx.beginPath(); ctx.moveTo(ax1,ay1); ctx.lineTo(ax2,ay2); ctx.stroke();
+      // perpendicular axis (beam-reach reference), same style, rotated 90°
+      const [px1,py1] = toXY(manualDir+90, r);
+      const [px2,py2] = toXY(manualDir+270, r);
+      ctx.beginPath(); ctx.moveTo(px1,py1); ctx.lineTo(px2,py2); ctx.stroke();
+      ctx.setLineDash([]);
+
+      const [wx,wy] = toXY(manualDir, r);
+      ctx.strokeStyle = '#ff5d5d';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(wx,wy); ctx.stroke();
+      ctx.fillStyle = '#ff5d5d';
+      ctx.beginPath(); ctx.arc(wx,wy,3,0,Math.PI*2); ctx.fill();
+    }
+
+    // Numerical readout for the selected point: speed, and heading
+    // relative to wind (same 0-180° convention as the rose diagram's own
+    // labels — 0° means heading exactly along the wind axis, upwind or
+    // downwind; 180° means heading exactly the opposite way along it).
+    // derived[] can be null right at the very first/last point of the
+    // track (outside firstValid..lastValid), so guard for that.
+    const d = derived[selected];
+    if(d){
+      const speedText = formatSpeed(d.speed);
+      const windText = manualDir != null ? angleDiff180(d.heading, manualDir).toFixed(0) + '° off wind' : '';
+      miniRoseReadout.textContent = windText ? `${speedText} · ${windText}` : speedText;
+    } else {
+      miniRoseReadout.textContent = '';
+    }
+  }
+
+  // ---------- selection info box (top-right overlay on the track map) ----------
+  // Shows details about whatever run / jibe / tack / failed attempt /
+  // crash-recovery / unclassified segment the currently selected point
+  // falls within — a quick "what is this part of the track, and how did
+  // it go" readout without needing to cross-reference the map's colors
+  // against the legend by eye.
+
+  const SEGMENT_TYPE_INFO = {
+    run:            { label: 'Run',              color: '#3ecf8e' },
+    jibe:           { label: 'Jibe',              color: '#c77dff' },
+    tack:           { label: 'Tack',              color: '#2dd4bf' },
+    failed_jibe:    { label: 'Failed jibe',       color: '#ff9d4d' },
+    failed_tack:    { label: 'Failed tack',       color: '#ff5d9e' },
+    crash_recovery: { label: 'Crash / recovery',  color: '#8a5a5a' },
+    unclassified:   { label: 'Unclassified',      color: '#8a95a1' },
+  };
+
+  // Which run/transition (if any) the given point index falls within, and
+  // that segment's own start/end bounds. Each transition type has its own
+  // notion of "end" depending on whether it's a full-length success/crash
+  // or a cut-short failed attempt — the same distinction drawMap already
+  // uses for rendering these ranges, reused here for consistency. If the
+  // index isn't inside any run or transition, it's unclassified — bounded
+  // by the nearest occupied range ending before it and the nearest one
+  // starting after it (track start/end if there's no such neighbor).
+  function findSelectedSegment(idx){
+    for(const run of currentRuns){
+      if(idx >= run.startIdx && idx <= run.endIdx){
+        return { type: 'run', startIdx: run.startIdx, endIdx: run.endIdx };
+      }
+    }
+    const occupied = [];
+    currentRuns.forEach(run => occupied.push([run.startIdx, run.endIdx]));
+    for(const tr of currentTransitions){
+      const isFullLength = tr.type === 'jibe' || tr.type === 'tack' || tr.type === 'crash_recovery';
+      const endIdx = isFullLength ? tr.transitionEnd : tr.attemptEndIdx;
+      occupied.push([tr.transitionStart, endIdx]);
+      if(idx >= tr.transitionStart && idx <= endIdx){
+        return { type: tr.type, startIdx: tr.transitionStart, endIdx, throughIdx: tr.throughIdx };
+      }
+    }
+    let lowBound = 0, highBound = points.length - 1;
+    occupied.forEach(([s,e])=>{
+      if(e < idx && e+1 > lowBound) lowBound = e+1;
+      if(s > idx && s-1 < highBound) highBound = s-1;
+    });
+    return { type: 'unclassified', startIdx: lowBound, endIdx: highBound };
+  }
+
+  // Stats for a segment, scoped to exactly the fields each type actually
+  // needs — see updateSelectionInfoBox for which fields each type reads.
+  function computeSegmentStats(seg, windAxis){
+    const { type, startIdx, endIdx } = seg;
+    const duration = points[endIdx].t - points[startIdx].t;
+
+    let totalDist = 0;
+    for(let i=startIdx+1;i<=endIdx;i++){
+      const dx = points[i].x-points[i-1].x, dy = points[i].y-points[i-1].y;
+      totalDist += Math.sqrt(dx*dx+dy*dy);
+    }
+    const avgSpeed = duration > 0 ? totalDist/duration : null;
+
+    // Net displacement (start point to end point — not total distance
+    // traveled) projected onto the wind axis: positive means the segment
+    // made net progress toward upwind, negative toward downwind.
+    let upwindDist = null;
+    if(windAxis != null){
+      const dx = points[endIdx].x - points[startIdx].x;
+      const dy = points[endIdx].y - points[startIdx].y;
+      const rad = windAxis*Math.PI/180;
+      upwindDist = dx*Math.sin(rad) + dy*Math.cos(rad);
+    }
+
+    const stats = { duration, avgSpeed, upwindDist };
+
+    if(type === 'run'){
+      let maxSpeed = -Infinity, maxSpeedIdx = null;
+      let offWindMin = Infinity, offWindMax = -Infinity;
+      for(let i=startIdx+1;i<=endIdx;i++){
+        const d = derived[i];
+        if(!d) continue;
+        if(d.speed > maxSpeed){ maxSpeed = d.speed; maxSpeedIdx = i; }
+        if(windAxis != null){
+          const ow = angleDiff180(d.heading, windAxis);
+          if(ow < offWindMin) offWindMin = ow;
+          if(ow > offWindMax) offWindMax = ow;
+        }
+      }
+      stats.maxSpeed = maxSpeedIdx != null ? maxSpeed : null;
+      stats.maxSpeedOffWind = (maxSpeedIdx != null && windAxis != null) ? angleDiff180(derived[maxSpeedIdx].heading, windAxis) : null;
+      stats.offWindMin = Number.isFinite(offWindMin) ? offWindMin : null;
+      stats.offWindMax = Number.isFinite(offWindMax) ? offWindMax : null;
+    }
+
+    if(type === 'jibe' || type === 'tack' || type === 'failed_jibe' || type === 'failed_tack'){
+      const entryD = derived[startIdx+1];
+      const exitD = derived[endIdx];
+      stats.entrySpeed = entryD ? entryD.speed : null;
+      stats.entryOffWind = (entryD && windAxis != null) ? angleDiff180(entryD.heading, windAxis) : null;
+      stats.exitSpeed = exitD ? exitD.speed : null;
+      stats.exitOffWind = (exitD && windAxis != null) ? angleDiff180(exitD.heading, windAxis) : null;
+
+      // "Through" the wind — the last vertex still on the original side,
+      // just before heading crosses the pole this maneuver is aiming past
+      // (see findThroughIdx). Threaded in via seg.throughIdx from
+      // findSelectedSegment, since it's computed once per transition in
+      // computeTransitions rather than re-derived here. null for a failed
+      // attempt that broke off before ever actually swinging past its pole.
+      const throughD = seg.throughIdx != null ? derived[seg.throughIdx] : null;
+      stats.throughSpeed = throughD ? throughD.speed : null;
+      stats.throughOffWind = (throughD && windAxis != null) ? angleDiff180(throughD.heading, windAxis) : null;
+
+      let minSpeed = Infinity, minSpeedIdx = null;
+      let maxSpeed = -Infinity, maxSpeedIdx = null;
+      for(let i=startIdx+1;i<=endIdx;i++){
+        const d = derived[i];
+        if(!d) continue;
+        if(d.speed < minSpeed){ minSpeed = d.speed; minSpeedIdx = i; }
+        if(d.speed > maxSpeed){ maxSpeed = d.speed; maxSpeedIdx = i; }
+      }
+      stats.minSpeed = minSpeedIdx != null ? minSpeed : null;
+      stats.minSpeedOffWind = (minSpeedIdx != null && windAxis != null) ? angleDiff180(derived[minSpeedIdx].heading, windAxis) : null;
+      stats.maxSpeed = maxSpeedIdx != null ? maxSpeed : null;
+      stats.maxSpeedOffWind = (maxSpeedIdx != null && windAxis != null) ? angleDiff180(derived[maxSpeedIdx].heading, windAxis) : null;
+    }
+
+    if(type === 'crash_recovery'){
+      // The edge just before the crash — transitionStart is already
+      // crashIdx-1 (see classifyTransition), and the crash edge itself
+      // runs from crashIdx-1 to crashIdx, so the edge ending AT
+      // transitionStart (derived[startIdx]) is the last normal edge
+      // before the gap begins.
+      const preCrashD = derived[startIdx];
+      stats.preCrashSpeed = preCrashD ? preCrashD.speed : null;
+      stats.preCrashOffWind = (preCrashD && windAxis != null) ? angleDiff180(preCrashD.heading, windAxis) : null;
+    }
+
+    return stats;
+  }
+
+  function updateSelectionInfoBox(){
+    if(points.length === 0) return;
+    const seg = findSelectedSegment(selected);
+    const windAxis = getManualWindDirection();
+    const stats = computeSegmentStats(seg, windAxis);
+    const info = SEGMENT_TYPE_INFO[seg.type] || { label: seg.type, color: '#8a95a1' };
+
+    const fmtOW = v => v != null ? v.toFixed(0)+'\u00b0' : '\u2014';
+    const fmtSpd = v => v != null ? formatSpeed(v) : '\u2014';
+    const fmtDur = v => v != null ? v.toFixed(0)+'s' : '\u2014';
+    const fmtUpwind = v => v != null ? (v>=0?'+':'')+v.toFixed(0)+'m' : '\u2014';
+
+    const rows = [`<div style="font-weight:600; color:${info.color}; margin-bottom:3px;">${info.label}</div>`];
+
+    if(seg.type === 'run'){
+      rows.push(`<div>duration: ${fmtDur(stats.duration)}</div>`);
+      rows.push(`<div>avg speed: ${fmtSpd(stats.avgSpeed)}</div>`);
+      rows.push(`<div>max speed: ${fmtSpd(stats.maxSpeed)} @ ${fmtOW(stats.maxSpeedOffWind)}</div>`);
+      rows.push(`<div>off-wind range: ${fmtOW(stats.offWindMin)}&ndash;${fmtOW(stats.offWindMax)}</div>`);
+      rows.push(`<div>upwind dist: ${fmtUpwind(stats.upwindDist)}</div>`);
+    } else if(seg.type === 'jibe' || seg.type === 'tack' || seg.type === 'failed_jibe' || seg.type === 'failed_tack'){
+      rows.push(`<div>entry: ${fmtSpd(stats.entrySpeed)} @ ${fmtOW(stats.entryOffWind)}</div>`);
+      rows.push(`<div>through: ${fmtSpd(stats.throughSpeed)} @ ${fmtOW(stats.throughOffWind)}</div>`);
+      rows.push(`<div>exit: ${fmtSpd(stats.exitSpeed)} @ ${fmtOW(stats.exitOffWind)}</div>`);
+      rows.push(`<div>min: ${fmtSpd(stats.minSpeed)} @ ${fmtOW(stats.minSpeedOffWind)}</div>`);
+      rows.push(`<div>max: ${fmtSpd(stats.maxSpeed)} @ ${fmtOW(stats.maxSpeedOffWind)}</div>`);
+      rows.push(`<div>duration: ${fmtDur(stats.duration)}</div>`);
+      rows.push(`<div>avg speed: ${fmtSpd(stats.avgSpeed)}</div>`);
+      rows.push(`<div>upwind dist: ${fmtUpwind(stats.upwindDist)}</div>`);
+    } else if(seg.type === 'crash_recovery'){
+      rows.push(`<div>pre-crash: ${fmtSpd(stats.preCrashSpeed)} @ ${fmtOW(stats.preCrashOffWind)}</div>`);
+      rows.push(`<div>duration: ${fmtDur(stats.duration)}</div>`);
+      rows.push(`<div>avg speed: ${fmtSpd(stats.avgSpeed)}</div>`);
+      rows.push(`<div>upwind dist: ${fmtUpwind(stats.upwindDist)}</div>`);
+    } else { // unclassified
+      rows.push(`<div>duration: ${fmtDur(stats.duration)}</div>`);
+      rows.push(`<div>avg speed: ${fmtSpd(stats.avgSpeed)}</div>`);
+      rows.push(`<div>upwind dist: ${fmtUpwind(stats.upwindDist)}</div>`);
+    }
+
+    selectionInfoBox.innerHTML = rows.join('');
+  }
+
+  (function setupMapInteraction(){
+    let dragging=false, dragged=false, lastX=0, lastY=0;
+
+    mapCanvas.addEventListener('mousedown', e=>{
+      dragging=true; dragged=false;
+      lastX=e.clientX; lastY=e.clientY;
+    });
+    window.addEventListener('mousemove', e=>{
+      if(!dragging || !mapView) return;
+      const dx = e.clientX-lastX, dy = e.clientY-lastY;
+      if(Math.abs(dx)+Math.abs(dy) > 3) dragged=true;
+      if(dragged){
+        mapZoom.panX -= dx/mapView.scale;
+        mapZoom.panY += dy/mapView.scale;
+        lastX=e.clientX; lastY=e.clientY;
+        drawMap();
+      }
+    });
+    window.addEventListener('mouseup', e=>{
+      if(!dragging) return;
+      dragging=false;
+      if(!dragged && mapView){
+        const rect = mapCanvas.getBoundingClientRect();
+        const mx = e.clientX-rect.left, my = e.clientY-rect.top;
+        let best=-1, bestD=Infinity;
+        for(let i=0;i<points.length;i++){
+          const p = points[i];
+          const X=mapView.sx(p.x), Y=mapView.sy(p.y);
+          const dd=(X-mx)*(X-mx)+(Y-my)*(Y-my);
+          if(dd<bestD){bestD=dd; best=i;}
+        }
+        if(best>=0){ selected=best; slider.value=best; redrawAll(); }
+      }
+    });
+    mapCanvas.addEventListener('wheel', e=>{
+      if(!mapView) return;
+      e.preventDefault();
+      const rect = mapCanvas.getBoundingClientRect();
+      const mx = e.clientX-rect.left, my = e.clientY-rect.top;
+      const dataX = mapView.centerX + (mx - mapView.w/2)/mapView.scale;
+      const dataY = mapView.centerY - (my - mapView.h/2)/mapView.scale;
+
+      const factor = e.deltaY < 0 ? 1.15 : 1/1.15;
+      mapZoom.scale = Math.max(0.2, Math.min(300, mapZoom.scale*factor));
+      const scaleAfter = mapView.baseScale * mapZoom.scale;
+
+      const newCenterX = dataX - (mx - mapView.w/2)/scaleAfter;
+      const newCenterY = dataY - (mapView.h/2 - my)/scaleAfter;
+
+      mapZoom.panX = newCenterX - mapView.cx0;
+      mapZoom.panY = newCenterY - mapView.cy0;
+
+      drawMap();
+    }, {passive:false});
+
+    // ---- touch: single-finger drag pans, two-finger pinch zooms ----
+    // Touch events keep targeting the element touchstart began on even as
+    // a finger moves outside its bounds, unlike mouse events — so unlike
+    // the mouse handlers above, everything here can stay on mapCanvas
+    // itself, no window-level listener needed.
+    let touchMode = null; // 'pan' | 'pinch' | null
+    let touchLastX=0, touchLastY=0, touchDragged=false, lastPinchDist=0;
+    const touchDist = (t0,t1) => Math.hypot(t1.clientX-t0.clientX, t1.clientY-t0.clientY);
+    const touchMid = (t0,t1) => ({x:(t0.clientX+t1.clientX)/2, y:(t0.clientY+t1.clientY)/2});
+
+    mapCanvas.addEventListener('touchstart', e=>{
+      if(e.touches.length === 1){
+        touchMode = 'pan'; touchDragged = false;
+        touchLastX = e.touches[0].clientX; touchLastY = e.touches[0].clientY;
+      } else if(e.touches.length === 2){
+        touchMode = 'pinch';
+        lastPinchDist = touchDist(e.touches[0], e.touches[1]);
+      }
+      e.preventDefault();
+    }, {passive:false});
+
+    mapCanvas.addEventListener('touchmove', e=>{
+      if(!mapView) return;
+      if(touchMode==='pan' && e.touches.length===1){
+        const t = e.touches[0];
+        const dx = t.clientX-touchLastX, dy = t.clientY-touchLastY;
+        if(Math.abs(dx)+Math.abs(dy) > 3) touchDragged=true;
+        if(touchDragged){
+          mapZoom.panX -= dx/mapView.scale;
+          mapZoom.panY += dy/mapView.scale;
+          touchLastX=t.clientX; touchLastY=t.clientY;
+          drawMap();
+        }
+      } else if(touchMode==='pinch' && e.touches.length===2){
+        const dist = touchDist(e.touches[0], e.touches[1]);
+        const mid = touchMid(e.touches[0], e.touches[1]);
+        const rect = mapCanvas.getBoundingClientRect();
+        const mx = mid.x-rect.left, my = mid.y-rect.top;
+        const dataX = mapView.centerX + (mx - mapView.w/2)/mapView.scale;
+        const dataY = mapView.centerY - (my - mapView.h/2)/mapView.scale;
+
+        // fingers spreading apart (dist growing) = zoom in = scale grows,
+        // same convention as the wheel handler's mapZoom.scale*factor
+        const factor = dist/Math.max(lastPinchDist,1);
+        mapZoom.scale = Math.max(0.2, Math.min(300, mapZoom.scale*factor));
+        const scaleAfter = mapView.baseScale * mapZoom.scale;
+
+        const newCenterX = dataX - (mx - mapView.w/2)/scaleAfter;
+        const newCenterY = dataY - (mapView.h/2 - my)/scaleAfter;
+        mapZoom.panX = newCenterX - mapView.cx0;
+        mapZoom.panY = newCenterY - mapView.cy0;
+
+        lastPinchDist = dist;
+        drawMap();
+      }
+      e.preventDefault();
+    }, {passive:false});
+
+    mapCanvas.addEventListener('touchend', e=>{
+      if(touchMode==='pan' && !touchDragged && mapView && e.changedTouches.length>0){
+        const t = e.changedTouches[0];
+        const rect = mapCanvas.getBoundingClientRect();
+        const mx = t.clientX-rect.left, my = t.clientY-rect.top;
+        let best=-1, bestD=Infinity;
+        for(let i=0;i<points.length;i++){
+          const p = points[i];
+          const X=mapView.sx(p.x), Y=mapView.sy(p.y);
+          const dd=(X-mx)*(X-mx)+(Y-my)*(Y-my);
+          if(dd<bestD){bestD=dd; best=i;}
+        }
+        if(best>=0){ selected=best; slider.value=best; redrawAll(); }
+      }
+      if(e.touches.length === 0){
+        touchMode = null;
+      } else if(e.touches.length === 1){
+        // dropped from pinch (2 fingers) to pan (1 finger) — reset the pan
+        // anchor to the remaining finger, and suppress tap-select once it
+        // eventually lifts too, since this gesture didn't start as a tap
+        touchMode = 'pan'; touchDragged = true;
+        touchLastX = e.touches[0].clientX; touchLastY = e.touches[0].clientY;
+      }
+    }, {passive:false});
+  })();
+
+  // ---------- draw: generic time series ----------
+  function drawTimeSeries(canvas, key, opts){
+    opts = opts || {};
+    const {ctx, w, h} = fitCanvasToCSS(canvas);
+    ctx.clearRect(0,0,w,h);
+    const pad = {l:38, r:10, t:8, b:18};
+
+    // Only the 'speed' metric gets unit-converted for display — this
+    // function is shared across all 5 kinematic plots, and acceleration/
+    // heading/curvature aren't affected by the speed unit setting.
+    // rawSpeed (the device-reported overlay) is always a speed regardless
+    // of which key is being plotted, so it always converts when present.
+    const isSpeedKey = key === 'speed';
+    function getVal(i){
+      const v = derived[i][key];
+      if(v == null) return null;
+      return isSpeedKey ? dispSpeed(v) : v;
+    }
+    function getRawSpeedVal(i){
+      const rs = points[i].rawSpeed;
+      if(rs == null || Number.isNaN(rs)) return null;
+      return dispSpeed(rs);
+    }
+
+    const tMin = timeView.tMin, tMax = timeView.tMax;
+    const vals = [];
+    for(let i=firstValid;i<=lastValid;i++){
+      if(points[i].t < tMin || points[i].t > tMax) continue;
+      const v = getVal(i); if(v != null) vals.push(v);
+      if(opts.overlayDeviceSpeed){ const rs = getRawSpeedVal(i); if(rs != null) vals.push(rs); }
+    }
+    if(vals.length < 2){
+      vals.length = 0;
+      for(let i=firstValid;i<=lastValid;i++){
+        const v = getVal(i); if(v != null) vals.push(v);
+        if(opts.overlayDeviceSpeed){ const rs = getRawSpeedVal(i); if(rs != null) vals.push(rs); }
+      }
+    }
+    if(vals.length === 0) vals.push(0,1); // nothing plottable in view — fall back to a harmless default range
+    let vMin = Math.min(...vals), vMax = Math.max(...vals);
+    if(opts.symmetric){
+      const m = Math.max(Math.abs(vMin), Math.abs(vMax));
+      vMin=-m; vMax=m;
+    }
+    if(vMax-vMin < 1e-6){ vMax+=1; vMin-=1; }
+    const pv = (vMax-vMin)*0.08;
+    vMin -= pv; vMax += pv;
+
+    const sx = makeScale(tMin, tMax, pad.l, w-pad.r);
+    const sy = makeScale(vMin, vMax, h-pad.b, pad.t);
+
+    // shade intervals where the gap to the next point exceeds the detected
+    // base sampling rate — visualizes dt-gaps directly (device dropout, or a
+    // widened gap from an earlier point deletion)
+    if(baseDtMs != null){
+      ctx.fillStyle = 'rgba(255,120,120,0.12)';
+      for(let i=0;i<points.length-1;i++){
+        const t0 = points[i].t, t1 = points[i+1].t;
+        if(t1 < tMin || t0 > tMax) continue;
+        const dtMs = points[i+1].time.getTime() - points[i].time.getTime();
+        if(dtMs > baseDtMs){
+          const X0 = sx(Math.max(t0,tMin)), X1 = sx(Math.min(t1,tMax));
+          if(X1 > X0) ctx.fillRect(X0, pad.t, X1-X0, h-pad.t-pad.b);
+        }
+      }
+    }
+
+    // shade "in a run" regions
+    ctx.fillStyle = 'rgba(62,207,142,0.10)';
+    currentRuns.forEach(run=>{
+      if(run.endT < tMin || run.startT > tMax) return;
+      const X0 = sx(Math.max(run.startT,tMin)), X1 = sx(Math.min(run.endT,tMax));
+      if(X1 > X0) ctx.fillRect(X0, pad.t, X1-X0, h-pad.t-pad.b);
+    });
+
+    // run boundary markers — dashed vertical ticks at each run's start/end
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2,3]);
+    currentRuns.forEach(run=>{
+      if(run.startT >= tMin && run.startT <= tMax){
+        const X = sx(run.startT);
+        ctx.beginPath(); ctx.moveTo(X, pad.t); ctx.lineTo(X, h-pad.b); ctx.stroke();
+      }
+      if(run.endT >= tMin && run.endT <= tMax){
+        const X = sx(run.endT);
+        ctx.beginPath(); ctx.moveTo(X, pad.t); ctx.lineTo(X, h-pad.b); ctx.stroke();
+      }
+    });
+    ctx.setLineDash([]);
+
+    // horizontal gridlines at 1/4 subdivisions (25%/50%/75% of the
+    // vertical range), each with its own value label. Bare numbers, no
+    // unit — the unit is shown once, next to the plot dropdown, instead
+    // of repeated on every label.
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+    ctx.lineWidth = 1;
+    ctx.fillStyle = '#7c8794';
+    ctx.font = '10px monospace';
+    [0.25, 0.5, 0.75].forEach(f=>{
+      const v = vMin + f*(vMax-vMin);
+      const Y = sy(v);
+      ctx.beginPath(); ctx.moveTo(pad.l, Y); ctx.lineTo(w-pad.r, Y); ctx.stroke();
+      ctx.fillText(v.toFixed(1), 2, Y+3);
+    });
+
+    // zero line if symmetric
+    if(opts.symmetric){
+      ctx.strokeStyle = '#33393f';
+      ctx.beginPath(); ctx.moveTo(pad.l, sy(0)); ctx.lineTo(w-pad.r, sy(0)); ctx.stroke();
+    }
+
+    // axis labels (min/max)
+    ctx.fillStyle = '#7c8794';
+    ctx.font = '10px monospace';
+    ctx.fillText(vMax.toFixed(1), 2, pad.t+8);
+    ctx.fillText(vMin.toFixed(1), 2, h-pad.b);
+
+    // threshold lines
+    if(opts.thresholds){
+      opts.thresholds.forEach(th=>{
+        ctx.strokeStyle = th.color;
+        ctx.setLineDash([4,3]);
+        ctx.beginPath(); ctx.moveTo(pad.l, sy(th.value)); ctx.lineTo(w-pad.r, sy(th.value)); ctx.stroke();
+        ctx.setLineDash([]);
+      });
+    }
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(pad.l, pad.t, w-pad.l-pad.r, h-pad.t-pad.b);
+    ctx.clip();
+
+    // line
+    ctx.strokeStyle = '#4fb3ff';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    let penDown = false;
+    for(let i=firstValid;i<=lastValid;i++){
+      const v = getVal(i);
+      if(v == null){ penDown = false; continue; } // gap-derived value — break the line here
+      const X = sx(points[i].t), Y = sy(v);
+      if(!penDown){ ctx.moveTo(X,Y); penDown = true; } else { ctx.lineTo(X,Y); }
+    }
+    ctx.stroke();
+
+    // device speed overlay
+    if(opts.overlayDeviceSpeed){
+      ctx.strokeStyle = '#3ecf8e';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      let started=false;
+      for(let i=firstValid;i<=lastValid;i++){
+        const rs = getRawSpeedVal(i);
+        if(rs == null) continue;
+        const X = sx(points[i].t), Y = sy(rs);
+        if(!started){ ctx.moveTo(X,Y); started=true; } else ctx.lineTo(X,Y);
+      }
+      ctx.stroke();
+    }
+
+    ctx.restore();
+
+    // selected marker
+    const X = sx(points[selected].t);
+    ctx.strokeStyle = '#fff';
+    ctx.beginPath(); ctx.moveTo(X, pad.t); ctx.lineTo(X, h-pad.b); ctx.stroke();
+
+    // selected point's value, at the base of its marker line — same size
+    // as the gridline labels, white to match the marker itself, no unit
+    // (shown once near the dropdown instead of repeated everywhere)
+    const selVal = getVal(selected);
+    if(selVal != null){
+      ctx.fillStyle = '#fff';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(selVal.toFixed(1), X, h-2);
+      ctx.textAlign = 'left';
+    }
+
+    canvas._scaleX = sx; canvas._domain = [tMin,tMax]; canvas._pad = pad; canvas._w = w;
+  }
+
+  function pixelToTime(canvas, px){
+    const [tMin,tMax] = canvas._domain;
+    return tMin + (px-canvas._pad.l)/(canvas._w-canvas._pad.l-canvas._pad.r)*(tMax-tMin);
+  }
+
+  function attachTimeInteraction(canvas){
+    let dragging=false, dragged=false, lastX=0;
+
+    canvas.addEventListener('mousedown', e=>{
+      dragging=true; dragged=false; lastX=e.clientX;
+    });
+    window.addEventListener('mousemove', e=>{
+      if(!dragging || !canvas._scaleX) return;
+      const dx = e.clientX-lastX;
+      if(Math.abs(dx) > 3) dragged=true;
+      if(dragged){
+        const plotW = canvas._w - canvas._pad.l - canvas._pad.r;
+        const dt = -dx/plotW*(timeView.tMax-timeView.tMin);
+        timeView.tMin += dt; timeView.tMax += dt;
+        clampTimeView();
+        lastX = e.clientX;
+        redrawTimeCharts();
+      }
+    });
+    window.addEventListener('mouseup', e=>{
+      if(!dragging) return;
+      dragging=false;
+      if(!dragged && canvas._scaleX){
+        const rect = canvas.getBoundingClientRect();
+        const t = pixelToTime(canvas, e.clientX-rect.left);
+        let best=0, bestD=Infinity;
+        for(let i=0;i<points.length;i++){
+          const dd = Math.abs(points[i].t - t);
+          if(dd<bestD){bestD=dd;best=i;}
+        }
+        selected = best; slider.value = best; redrawAll();
+      }
+    });
+    canvas.addEventListener('wheel', e=>{
+      if(!canvas._scaleX) return;
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const tCursor = pixelToTime(canvas, e.clientX-rect.left);
+      const factor = e.deltaY < 0 ? 1/1.15 : 1.15; // wheel up = zoom in = narrower window
+      let newMin = tCursor - (tCursor-timeView.tMin)*factor;
+      let newMax = tCursor + (timeView.tMax-tCursor)*factor;
+      const minSpan = 1; // seconds, don't zoom in past this
+      if(newMax-newMin < minSpan){
+        const mid=(newMin+newMax)/2; newMin=mid-minSpan/2; newMax=mid+minSpan/2;
+      }
+      timeView.tMin = newMin; timeView.tMax = newMax;
+      clampTimeView();
+      redrawTimeCharts();
+    }, {passive:false});
+
+    // ---- touch: single-finger drag pans, two-finger pinch zooms ----
+    // Horizontal-only pinch distance, matching the chart's own 1D (time)
+    // axis — no vertical component to consider here, unlike the map.
+    let touchMode = null, touchLastX=0, touchDragged=false, lastPinchDist=0;
+
+    canvas.addEventListener('touchstart', e=>{
+      if(!canvas._scaleX) return;
+      if(e.touches.length === 1){
+        touchMode='pan'; touchDragged=false; touchLastX=e.touches[0].clientX;
+      } else if(e.touches.length === 2){
+        touchMode='pinch';
+        lastPinchDist = Math.abs(e.touches[1].clientX - e.touches[0].clientX);
+      }
+      e.preventDefault();
+    }, {passive:false});
+
+    canvas.addEventListener('touchmove', e=>{
+      if(!canvas._scaleX) return;
+      if(touchMode==='pan' && e.touches.length===1){
+        const t = e.touches[0];
+        const dx = t.clientX-touchLastX;
+        if(Math.abs(dx)>3) touchDragged=true;
+        if(touchDragged){
+          const plotW = canvas._w - canvas._pad.l - canvas._pad.r;
+          const dt = -dx/plotW*(timeView.tMax-timeView.tMin);
+          timeView.tMin += dt; timeView.tMax += dt;
+          clampTimeView();
+          touchLastX = t.clientX;
+          redrawTimeCharts();
+        }
+      } else if(touchMode==='pinch' && e.touches.length===2){
+        const dist = Math.abs(e.touches[1].clientX - e.touches[0].clientX);
+        const midX = (e.touches[0].clientX + e.touches[1].clientX)/2;
+        const rect = canvas.getBoundingClientRect();
+        const tCursor = pixelToTime(canvas, midX-rect.left);
+        // fingers spreading apart (dist growing) = zoom in = narrower
+        // window, same convention as the wheel handler above
+        const factor = lastPinchDist/Math.max(dist,1);
+        let newMin = tCursor - (tCursor-timeView.tMin)*factor;
+        let newMax = tCursor + (timeView.tMax-tCursor)*factor;
+        const minSpan = 1;
+        if(newMax-newMin < minSpan){
+          const mid=(newMin+newMax)/2; newMin=mid-minSpan/2; newMax=mid+minSpan/2;
+        }
+        timeView.tMin = newMin; timeView.tMax = newMax;
+        clampTimeView();
+        lastPinchDist = dist;
+        redrawTimeCharts();
+      }
+      e.preventDefault();
+    }, {passive:false});
+
+    canvas.addEventListener('touchend', e=>{
+      if(!canvas._scaleX) return;
+      if(touchMode==='pan' && !touchDragged && e.changedTouches.length>0){
+        const t = e.changedTouches[0];
+        const rect = canvas.getBoundingClientRect();
+        const tVal = pixelToTime(canvas, t.clientX-rect.left);
+        let best=0, bestD=Infinity;
+        for(let i=0;i<points.length;i++){
+          const dd = Math.abs(points[i].t - tVal);
+          if(dd<bestD){bestD=dd;best=i;}
+        }
+        selected = best; slider.value = best; redrawAll();
+      }
+      if(e.touches.length === 0){
+        touchMode = null;
+      } else if(e.touches.length === 1){
+        touchMode = 'pan'; touchDragged = true; // dropped from pinch to pan — don't tap-select on eventual lift
+        touchLastX = e.touches[0].clientX;
+      }
+    }, {passive:false});
+  }
+  attachTimeInteraction(kinematicCanvas);
+
+  // Config for the single collapsed kinematic plot — dropdown value maps
+  // directly to the drawTimeSeries key/opts that used to be hardcoded per
+  // canvas when there were five separate ones.
+  const KINEMATIC_PLOTS = {
+    speed: { key: 'speed', opts: {overlayDeviceSpeed:true}, name: 'speed', unit: () => SPEED_UNIT_LABELS[speedUnit] },
+    tanAccel: { key: 'tanAccel', opts: {symmetric:true}, name: 'tangential acceleration', unit: () => 'm/s\u00b2' },
+    centripetalAccel: { key: 'centripetalAccel', opts: {symmetric:true}, name: 'centripetal acceleration', unit: () => 'm/s\u00b2' },
+    headingUnwrapped: { key: 'headingUnwrapped', opts: {}, name: 'heading', unit: () => 'deg' },
+    curvature: { key: 'curvature', opts: {symmetric:true}, name: 'curvature', unit: () => '/m' },
+  };
+  const kinematicLegendToggleBtn = el('kinematicLegendToggleBtn');
+  const kinematicLegendContainer = el('kinematicLegendContainer');
+  const kinematicLegend = el('kinematicLegend');
+  const kinematicUnitLabel = el('kinematicUnitLabel');
+  setupToggle(kinematicLegendToggleBtn, kinematicLegendContainer, 'legend');
+  kinematicSelect.addEventListener('change', ()=>{ redrawTimeCharts(); });
+
+  function redrawTimeCharts(){
+    const plot = KINEMATIC_PLOTS[kinematicSelect.value] || KINEMATIC_PLOTS.speed;
+    drawTimeSeries(kinematicCanvas, plot.key, plot.opts);
+    updateKinematicUnitLabel(plot);
+    updateKinematicLegend(plot);
+  }
+
+  function updateKinematicUnitLabel(plot){
+    kinematicUnitLabel.textContent = 'unit: ' + plot.unit();
+  }
+
+  function updateKinematicLegend(plot){
+    let html = `
+      <span><span class="sw" style="background:rgba(255,120,120,0.5)"></span>gap</span>
+      <span><span class="sw" style="background:rgba(62,207,142,0.3)"></span>in a run</span>
+      <span><span class="sw" style="border-left:2px dashed rgba(255,255,255,.5); background:transparent; width:1px;"></span>run boundary</span>
+      <span><span class="sw" style="background:#4fb3ff"></span>${plot.name}</span>
+    `;
+    if(plot.opts.overlayDeviceSpeed){
+      html += `<span><span class="sw" style="background:#3ecf8e"></span>device speed</span>`;
+    }
+    kinematicLegend.innerHTML = html;
+  }
+
+  // ---------- info panel ----------
+  function drawInfo(){
+    const p = points[selected], d = derived[selected];
+    const dtPrev = selected>0 ? (p.t - points[selected-1].t).toFixed(2) : '-';
+    const dtNext = selected<points.length-1 ? (points[selected+1].t - p.t).toFixed(2) : '-';
+
+    const fmt = (v, suffix) => v==null ? '—' : v.toFixed(2)+suffix;
+    const inRun = currentRuns.find(r=>selected>=r.startIdx && selected<=r.endIdx);
+
+    infoGrid.innerHTML = `
+      <div><span class="k">index</span><span class="v">${selected} / ${points.length-1}</span></div>
+      <div><span class="k">time</span><span class="v">${p.time.toISOString().substr(11,8)}</span></div>
+      <div><span class="k">t (s)</span><span class="v">${p.t.toFixed(2)}</span></div>
+      <div><span class="k">dt prev/next</span><span class="v">${dtPrev}s / ${dtNext}s</span></div>
+      <div><span class="k">sampling window</span><span class="v">${d ? (d.uniformSampling ? '<span style="color:var(--good)">uniform</span>' : '<span style="color:var(--warn)">irregular</span>') : '—'}</span></div>
+      <div><span class="k">accel/curvature valid</span><span class="v">${d ? (d.curvature!=null ? '<span style="color:var(--good)">yes</span>' : '<span style="color:var(--warn)">no (gap-adjacent)</span>') : '—'}</span></div>
+      <div><span class="k">lat, lon</span><span class="v">${p.lat.toFixed(6)}, ${p.lon.toFixed(6)}</span></div>
+      <div><span class="k">x, y (m)</span><span class="v">${p.x.toFixed(1)}, ${p.y.toFixed(1)}</span></div>
+      <div><span class="k">speed (derived)</span><span class="v">${d ? formatSpeed(d.speed, 2) : '— (endpoint, no 3-pt derivation)'}</span></div>
+      <div><span class="k">device speed</span><span class="v">${p.rawSpeed!=null ? formatSpeed(p.rawSpeed, 2) : '—'}</span></div>
+      <div><span class="k">tangential accel</span><span class="v">${fmt(d?d.tanAccel:null,' m/s²')}</span></div>
+      <div><span class="k">|accel| vector</span><span class="v">${fmt(d?d.accelMag:null,' m/s²')}</span></div>
+      <div><span class="k">centripetal accel</span><span class="v">${fmt(d?d.centripetalAccel:null,' m/s²')}</span></div>
+      <div><span class="k">curvature</span><span class="v">${(d && d.curvature!=null) ? d.curvature.toExponential(2)+' /m' : '—'}</span></div>
+      <div><span class="k">heading</span><span class="v">${d ? d.heading.toFixed(0)+'°' : '—'}</span></div>
+      <div><span class="k">classification</span><span class="v">${inRun ? '<span style="color:var(--good)">in run ('+inRun.duration.toFixed(1)+'s)</span>' : '<span style="color:var(--dim)">not in any run</span>'}</span></div>
+    `;
+  }
+
+  function redrawAll(){
+    currentRuns = computeRuns();
+    currentWindEstimate = computeWindEstimate();
+    const windDirForTransitions = getManualWindDirection();
+    currentTransitions = computeTransitions(windDirForTransitions);
+
+    // If the manual TACK SPLIT is standing in for an undetermined
+    // calculation, or meaningfully overriding a determined one, redo the
+    // bucket analysis using it directly as the split axis — so manually
+    // tuning the split shows its own consistent medians and top-speed
+    // lines to check against, rather than leaving those frozen on
+    // whatever the (possibly wrong, or entirely absent) calculation
+    // found. Deliberately keyed off the split control specifically, not
+    // wind direction — overriding wind direction alone just changes which
+    // side is called downwind, it doesn't mean the split boundary itself
+    // needs to move. (The wind axis line itself, separately, does rotate
+    // with a manual wind-direction override — see drawWindRose.)
+    const est = currentWindEstimate;
+    const manualSplit = getManualTackSplit();
+    const isOverridingSplit = manualSplit != null && (est.splitAxis == null || angleDiff180(manualSplit, est.splitAxis) > 0.5);
+    if(isOverridingSplit){
+      const bucketA = computeBucketStats(est.bins, est.maxSpeedBins, manualSplit, true);
+      const bucketB = computeBucketStats(est.bins, est.maxSpeedBins, manualSplit, false);
+      currentOverrideBuckets = { splitAxis: manualSplit, bucketA, bucketB };
+    } else {
+      currentOverrideBuckets = null;
+    }
+
+    drawMap(); // calls drawMiniRose() internally — see drawMap
+    redrawTimeCharts();
+    drawInfo();
+    drawWindRose();
+    updateStatsBar();
+  }
+
+  function syncNavbarSpacer(){
+    el('navbarSpacer').style.height = navBar.getBoundingClientRect().height + 'px';
+  }
+  window.addEventListener('resize', ()=>{ if(mainLayout.style.display!=='none') redrawAll(); syncNavbarSpacer(); });
+
+})();
+</script>
+</body>
+</html>
