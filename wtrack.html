@@ -169,12 +169,44 @@
 
   <div class="panel">
     <div class="panel-header">
+      <h2>Run detection</h2>
+      <button id="runDetectionToggleBtn" type="button">show details</button>
+    </div>
+    <div id="runDetectionContainer" style="display:none;">
+      <div class="row thresh">
+        <label style="color:var(--good);">vertex checks (anywhere in a run):</label>
+        <label>run breaks if |curvature| &ge; <input type="number" id="runCurvThresh" value="0.15" step="0.01" min="0"> /m</label>
+        <label>or tangential accel deviates (fit vs edge) &ge; <input type="number" id="runAccelDeviationThresh" value="5" step="0.5" min="0"> m/s&sup2;</label>
+      </div>
+      <div class="row thresh">
+        <label style="color:var(--good);">edge checks (anywhere in a run):</label>
+        <label>run breaks if speed &le; <input type="number" id="runLowSpeedThresh" value="0.3" step="0.1" min="0"> m/s</label>
+        <label>or accumulated heading swings &ge; <input type="number" id="runBreakHeadingThresh" value="120" step="1" min="0"> &deg; (wide angle) anywhere in the run</label>
+      </div>
+      <div class="row thresh">
+        <label style="color:var(--good);">warm-up / trailing straightness only:</label>
+        <label>window needs &ge; <input type="number" id="runMinEdges" value="2" step="1" min="1"> edges</label>
+        <label>and &ge; <input type="number" id="runMinSec" value="2" step="1" min="0"> s (covers variable-dt tracks with few samples per second)</label>
+        <label>heading range within the window &lt; <input type="number" id="runNarrowHeadingThresh" value="10" step="1" min="0"> &deg; (narrow angle)</label>
+        <label>every vertex needs fit centripetal accel &lt; <input type="number" id="runWarmupCentripetalAccelThresh" value="1.2" step="0.1" min="0"> m/s&sup2;</label>
+      </div>
+      <div class="row thresh">
+        <label style="color:var(--good);">run acceptance:</label>
+        <label>min run duration <input type="number" id="runMinDuration" value="15" step="1" min="0"> s</label>
+        <label><input type="checkbox" id="reconnectEnabled" checked> reconnect walk-back breaks</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
       <h2>Track (X–Y, metres, local ENU)</h2>
       <div style="display:flex; gap:8px;">
         <button id="trackLegendToggleBtn" type="button">show legend</button>
         <button id="miniRoseModeBtn" type="button">compass: corner</button>
         <button id="osmToggleBtn" type="button">show map background</button>
         <button id="edgeColorToggleBtn" type="button">color: by type</button>
+        <button id="deleteSpeedLagBtn" type="button" style="border-color:var(--warn); color:var(--warn);">delete speed-lag points</button>
       </div>
     </div>
     <div id="trackLegendContainer" style="display:none;">
@@ -217,6 +249,9 @@
           <option value="centripetalAccel">centripetal acceleration</option>
           <option value="headingUnwrapped">heading</option>
           <option value="curvature">curvature</option>
+          <option value="lengthDeviation">path length deviation</option>
+          <option value="tangentialJerk">tangential jerk</option>
+          <option value="centripetalJerk">centripetal jerk</option>
         </select>
         <span id="kinematicUnitLabel" style="font-size:12px; color:var(--dim);"></span>
       </div>
@@ -237,20 +272,24 @@
         <option value="kmh">km/h</option>
         <option value="kt">knots</option>
       </select></label>
+      <label style="font-size:13px;">length unit: <select id="lengthUnitSelect">
+        <option value="km">km</option>
+        <option value="nm">nm</option>
+      </select></label>
       <span style="color:var(--dim); font-size:11px;">scroll to zoom &middot; drag to pan (time charts stay in sync)</span>
     </div>
     <div class="row thresh">
-      <label style="color:var(--good);">run detection:</label>
-      <label>run breaks if |curvature| &ge; <input type="number" id="runCurvThresh" value="1" step="0.01" min="0"> /m</label>
-      <label>or heading deviates &ge; <input type="number" id="runBreakHeadingThresh" value="90" step="1" min="0"> &deg; (wide angle) from run start</label>
-      <label>or speed &le; <input type="number" id="runLowSpeedThresh" value="0.3" step="0.1" min="0"> m/s</label>
-      <label>or derived&minus;device speed &ge; <input type="number" id="runDeviceDisagreeThresh" value="5" step="0.5" min="0"> m/s (if device speed present)</label>
-      <label>warm-up validated at &ge; <input type="number" id="runNarrowHeadingThresh" value="10" step="1" min="0"> &deg; (narrow angle)</label>
-      <label>trailing straightness sample <input type="number" id="runTailSampleEdges" value="5" step="1" min="1"> edges (narrow angle)</label>
-      <label>reconnect walk-back breaks if lead-in/out differ &lt; <input type="number" id="reconnectAngle" value="30" step="1" min="0"> &deg;</label>
+      <label style="color:var(--good);">transition classification:</label>
       <label>loose tack success: under <input type="number" id="looseTackMaxDuration" value="20" step="1" min="0"> s, &le; <input type="number" id="looseTackMaxStallTime" value="5" step="0.5" min="0"> s total below low-speed threshold</label>
-      <label>warm-up length <input type="number" id="runMinSec" value="5" step="1" min="0"> s</label>
-      <label>min run duration <input type="number" id="runMinDuration" value="12" step="1" min="0"> s</label>
+    </div>
+    <div class="row thresh">
+      <label style="color:var(--warn);">local path fit:</label>
+      <label>window <input type="number" id="fitNumPoints" value="8" step="1" min="4"> points</label>
+      <label>degree <input type="number" id="fitDegree" value="5" step="1" min="1"> polynomial</label>
+    </div>
+    <div class="row thresh">
+      <label style="color:var(--warn);">speed-lag detection:</label>
+      <label>flag if tangential accel deviates &ge; <input type="number" id="speedLagAccelThresh" value="1" step="0.1" min="0"> m/s&sup2; from the local path fit</label>
     </div>
     <div class="info-grid" id="infoGrid"></div>
   </div>
@@ -272,6 +311,7 @@
   // ---------- state ----------
   let points = [];     // {lat, lon, ele, time(Date), t(sec), x, y, rawSpeed(optional)}
   let derived = [];    // same length as points; null for endpoints; else {speed, ax, ay, accelMag, tanAccel, heading, headingUnwrapped}
+  let fitDerived = []; // same length as points; null except where a full 5-point window exists; see computeFitKinematics
   let selected = 0;
   let firstValid = 0, lastValid = 0;
 
@@ -340,6 +380,17 @@
     if(v == null) return null;
     return dispSpeed(v).toFixed(decimals==null?1:decimals) + ' ' + SPEED_UNIT_LABELS[speedUnit];
   }
+  // Same pattern as speed, for distance/length readouts (currently just
+  // the session total length stat). 1 nautical mile = 1852m exactly, by
+  // definition — not an approximation.
+  const LENGTH_UNIT_FACTORS = { km: 0.001, nm: 1/1852 };
+  const LENGTH_UNIT_LABELS = { km: 'km', nm: 'nm' };
+  let lengthUnit = 'km';
+  function dispLength(v){ return v * LENGTH_UNIT_FACTORS[lengthUnit]; }
+  function formatLength(v, decimals){
+    if(v == null) return null;
+    return dispLength(v).toFixed(decimals==null?2:decimals) + ' ' + LENGTH_UNIT_LABELS[lengthUnit];
+  }
   let currentSpeedGradientRange = {min:0, max:1}; // set by drawMap whenever edgeColorMode is 'speed', read by updateTrackLegend
   const trackLegend = el('trackLegend');
   const speedUnitSelect = el('speedUnitSelect');
@@ -347,11 +398,17 @@
     speedUnit = speedUnitSelect.value;
     redrawAll();
   });
+  const lengthUnitSelect = el('lengthUnitSelect');
+  lengthUnitSelect.addEventListener('change', ()=>{
+    lengthUnit = lengthUnitSelect.value;
+    redrawAll();
+  });
   edgeColorToggleBtn.addEventListener('click', ()=>{
     edgeColorMode = edgeColorMode === 'type' ? 'speed' : 'type';
     edgeColorToggleBtn.textContent = 'color: by ' + edgeColorMode;
     drawMap();
   });
+  el('deleteSpeedLagBtn').addEventListener('click', deleteSpeedLagArtifacts);
   const kinematicCanvas = el('kinematicCanvas');
   const kinematicSelect = el('kinematicSelect');
   const windRoseCanvas = el('windRoseCanvas');
@@ -363,6 +420,8 @@
   const tackSplitResetBtn = el('tackSplitResetBtn');
   const windRoseToggleBtn = el('windRoseToggleBtn');
   const windRoseContainer = el('windRoseContainer');
+  const runDetectionToggleBtn = el('runDetectionToggleBtn');
+  const runDetectionContainer = el('runDetectionContainer');
   const trackLegendToggleBtn = el('trackLegendToggleBtn');
   const trackLegendContainer = el('trackLegendContainer');
 
@@ -468,12 +527,12 @@
     });
   }
   setupToggle(windRoseToggleBtn, windRoseContainer, 'details');
+  setupToggle(runDetectionToggleBtn, runDetectionContainer, 'details');
   setupToggle(trackLegendToggleBtn, trackLegendContainer, 'legend');
   const runCurvThreshInput = el('runCurvThresh');
   const runBreakHeadingThreshInput = el('runBreakHeadingThresh');
   const runNarrowHeadingThreshInput = el('runNarrowHeadingThresh');
-  const runTailSampleEdgesInput = el('runTailSampleEdges');
-  const reconnectAngleInput = el('reconnectAngle');
+  const runMinEdgesInput = el('runMinEdges');
   const looseTackMaxDurationInput = el('looseTackMaxDuration');
   const looseTackMaxStallTimeInput = el('looseTackMaxStallTime');
 
@@ -490,8 +549,13 @@
 
   const runMinSecInput = el('runMinSec');
   const runMinDurationInput = el('runMinDuration');
+  const reconnectEnabledInput = el('reconnectEnabled');
   const runLowSpeedThreshInput = el('runLowSpeedThresh');
-  const runDeviceDisagreeThreshInput = el('runDeviceDisagreeThresh');
+  const runAccelDeviationThreshInput = el('runAccelDeviationThresh');
+  const runWarmupCentripetalAccelThreshInput = el('runWarmupCentripetalAccelThresh');
+  const fitNumPointsInput = el('fitNumPoints');
+  const fitDegreeInput = el('fitDegree');
+  const speedLagAccelThreshInput = el('speedLagAccelThresh');
   let hasDeviceSpeed = false;
   let currentRuns = []; // [{startIdx, endIdx, startT, endT, duration}, ...]
   let currentWindEstimate = null;
@@ -852,12 +916,25 @@
   //
   // For a run of points sharing a timestamp, rather than arbitrarily
   // keeping whichever the device happened to log first, keeps whichever
-  // ONE point minimizes the difference between the edge distance
-  // immediately BEFORE it (from the nearest already-kept point) and the
-  // edge distance immediately AFTER it (to the next distinct-timestamp
-  // point) — the point that best preserves a smooth, consistent step
-  // size through this moment, rather than risking an arbitrary pick that
-  // leaves a large jump on one side and a tiny one on the other.
+  // ONE point minimizes the difference between the SPEED immediately
+  // BEFORE it (from the nearest already-kept point) and the speed
+  // immediately AFTER it (to the next distinct-timestamp point) — not
+  // raw distance. This distinction matters: every candidate in the group
+  // shares the identical timestamp, so dtBefore and dtAfter are the same
+  // fixed values regardless of which one gets kept — only the resulting
+  // DISTANCE (and therefore speed) differs by candidate. The typical
+  // real cause here is a point with a genuinely correct position that
+  // got snapped to the wrong timestamp, which leaves dtBefore and dtAfter
+  // asymmetric (one side effectively swallowed the sample that should
+  // have been there, widening it). Balancing distance alone ignores that
+  // asymmetry completely and lets the longer-duration side's computed
+  // speed come out silently lower (or the shorter side's silently
+  // higher) even when the true physical speed through here was roughly
+  // steady — confirmed with a synthetic case: with dtBefore=1s,
+  // dtAfter=2s, distance-balancing picked a point implying a jump from
+  // 15 m/s to 7.5 m/s across it, while speed-balancing picked the point
+  // implying a flat 10 m/s on both sides, which was the actual constant-
+  // speed answer the scenario was built from.
   function dedupeTimestamps(){
     const deduped = [];
     let i = 0;
@@ -869,11 +946,21 @@
       } else {
         const prev = deduped.length > 0 ? deduped[deduped.length-1] : null;
         const next = j < points.length ? points[j] : null;
+        // Fixed for the whole group — every candidate shares points[i]'s
+        // own timestamp, so these don't vary by k.
+        const dtBefore = prev ? (points[i].time.getTime() - prev.time.getTime())/1000 : null;
+        const dtAfter = next ? (next.time.getTime() - points[i].time.getTime())/1000 : null;
         let bestK = i, bestDiff = Infinity;
         for(let k=i; k<j; k++){
           const distBefore = prev ? Math.hypot(points[k].x-prev.x, points[k].y-prev.y) : 0;
           const distAfter = next ? Math.hypot(next.x-points[k].x, next.y-points[k].y) : 0;
-          const diff = Math.abs(distBefore - distAfter);
+          const speedBefore = (dtBefore != null && dtBefore > 0) ? distBefore/dtBefore : null;
+          const speedAfter = (dtAfter != null && dtAfter > 0) ? distAfter/dtAfter : null;
+          // If either side is missing (start/end of track) or has zero
+          // duration, there's no meaningful speed comparison to make —
+          // treat every candidate as equally good rather than
+          // arbitrarily preferring one, same graceful degrade as before.
+          const diff = (speedBefore != null && speedAfter != null) ? Math.abs(speedBefore - speedAfter) : 0;
           if(diff < bestDiff){ bestDiff = diff; bestK = k; }
         }
         deduped.push(points[bestK]);
@@ -922,6 +1009,7 @@
       const uniformSampling = baseDtMs != null && dtMs === baseDtMs;
       derived[i] = {vx, vy, speed, heading, uniformSampling,
         ax:null, ay:null, accelMag:null, tanAccel:null, centripetalAccel:null, curvature:null,
+        jerkMag:null, tangentialJerk:null, centripetalJerk:null,
         headingUnwrapped:null};
     }
 
@@ -1000,10 +1088,213 @@
       derived[i].tanAccel = tanAccel; derived[i].centripetalAccel = centripetalAccel; derived[i].curvature = curvature;
     }
 
+    // Pass 3: jerk — the rate of change of ACCELERATION, not
+    // velocity — attributed to edge B→C specifically: the same "stored at
+    // the edge's ending index" convention speed(i) already uses, since
+    // jerk describes how much acceleration changed ACROSS that edge, a
+    // property of the edge itself rather than a point-event at either of
+    // its endpoints on their own — exactly the relationship speed(i)
+    // already has to edge(i-1,i).
+    //
+    // Deliberately NOT a scalar difference of the two already-projected
+    // tanAccel values (derived[i+1].tanAccel − derived[i].tanAccel) — those
+    // were each projected onto a DIFFERENT basis (accel(B) onto the average
+    // of vB,vC; accel(C) onto the average of vC,vD), so a plain scalar
+    // subtraction compares two numbers computed against two slightly
+    // different tangent directions, not a clean single-axis decomposition.
+    // Confirmed the difference is real, not academic: a synthetic
+    // turning-and-accelerating case gave -0.50 via the naive scalar-
+    // difference shortcut versus -1.50 via the approach below — the naive
+    // version was silently cancelling real signal against the basis
+    // mismatch. Instead: difference the raw (ax,ay) VECTORS first, then
+    // project that single vector onto edge B→C's own velocity (the one
+    // velocity sample genuinely local to this specific edge) exactly once.
+    //
+    // Not read by any check anymore — a run-detection edge check briefly
+    // used this raw finite-difference version, then the fit's own
+    // smoothed jerk (§7) once the raw one proved too noisy, then neither
+    // once the fit-based version also turned out unhelpful in practice
+    // (too noisy even on straight-ish segments, and separately unable to
+    // reliably locate a jibe's true exit, its original motivating
+    // purpose — jerk there tends to be low anyway). Kept purely for its
+    // own kinematics-chart plots — genuinely useful to look at, even
+    // though it didn't end up driving an automatic decision. jerkMag
+    // (the raw vector magnitude, before any projection) and the
+    // tangential/centripetal split are both computed and stored, for the
+    // same reason acceleration's own split is available beyond just
+    // accelMag.
+    for(let i=1;i<=n-3;i++){
+      const aB = derived[i], aC = derived[i+1];
+      if(!aB || !aC || aB.ax == null || aC.ax == null) continue;
+      const dt = points[i+1].t - points[i].t; // edge B→C's own duration
+      if(dt <= 0) continue;
+      const jerkX = (aC.ax - aB.ax)/dt, jerkY = (aC.ay - aB.ay)/dt;
+      const jerkMag = Math.sqrt(jerkX*jerkX + jerkY*jerkY);
+      const bcSpeed = aC.speed; // edge B→C's own speed — the local tangent basis
+      const tangentialJerk = bcSpeed > 1e-6 ? (jerkX*aC.vx + jerkY*aC.vy)/bcSpeed : 0;
+      const centripetalJerk = bcSpeed > 1e-6 ? (aC.vx*jerkY - aC.vy*jerkX)/bcSpeed : 0;
+      derived[i+1].jerkMag = jerkMag;
+      derived[i+1].tangentialJerk = tangentialJerk;
+      derived[i+1].centripetalJerk = centripetalJerk;
+    }
+
     firstValid = 1;
     lastValid = n-1;
 
     hasDeviceSpeed = points.some(p=>p.rawSpeed !== null && !Number.isNaN(p.rawSpeed));
+
+    computeFitKinematics();
+  }
+
+  // Sweeps the whole track, fitting a polynomial (window size and degree
+  // both user-configurable — fitNumPointsInput/fitDegreeInput) through a
+  // window of points and deriving kinematics at the window's own
+  // "central edge's endpoint": for N points there are N-1 edges, and the
+  // point evaluated is the one ending the middle-most edge —
+  // numBefore = floor(N/2) points before it, numAfter = (N-1)-numBefore
+  // after. For odd N this lands exactly centered; for even N (the N=8
+  // default: 4 before, 3 after) it lands one point off true-center.
+  // This formula, and the choice to evaluate near-center rather than at a
+  // window's true trailing endpoint, is a compromise arrived at
+  // iteratively — see git history / prior discussion for the full
+  // reasoning: a fully centered window gives the best smoothing
+  // (leverage is lowest at a window's center — see the earlier leverage
+  // discussion) but needs forward history too, so it loses kinematics
+  // for points just before any gap/crash; evaluating at a window's true
+  // trailing endpoint fixes that but leverage there is close to 1, so
+  // the fit is nearly forced through that one point, giving away almost
+  // all the smoothing the wider window was for. Landing near-but-not-
+  // exactly-at-center (this formula) recovers most of the smoothing
+  // while still surviving closer to a gap than a fully centered window
+  // would.
+  //
+  // Does not skip windows spanning a true gap (edgeGapFails) — that was
+  // tried and produces a plausible-looking loop or excursion on the map
+  // where the fit has to bridge a genuine gap, but the kinematics
+  // DERIVED from it (velocity/acceleration at the evaluation point
+  // specifically) still came out as reasonable values in practice, so
+  // skipping them and losing real data near every crash wasn't worth
+  // avoiding an odd-looking curve on the map — accepted as a known,
+  // cosmetic-only quirk instead.
+  //
+  // Same fitPolynomialLS machinery as computeLocalCubicFit, generalized
+  // to every index rather than just the current selection; deriving
+  // kinematics directly from the fit's own coefficients — no finite
+  // differences, and no averaged-adjacent-edge-velocity projection trick
+  // either: a polynomial's derivatives are exact at any point, so for
+  // x(t) = a0 + a1*t + a2*t^2 + ... (t re-centered so the evaluation
+  // point sits at t=0), x'(0) = a1 and x''(0) = 2*a2 directly regardless
+  // of the polynomial's degree — terms beyond a2 shape the curve away
+  // from t=0 but don't affect these two derivatives AT t=0 at all, so
+  // the extraction formulas stay fixed even as the degree control
+  // changes. Same tangential/centripetal/curvature formulas as
+  // computeDerived's own pass 2, but where that pass needs to average
+  // two adjacent edge velocities to approximate an instantaneous one
+  // (finite-difference velocity is only ever an edge average, never
+  // truly instantaneous), the fit already provides a genuinely
+  // instantaneous velocity at the evaluation point — so that's used
+  // directly as the projection direction here, with nothing to average.
+  const ARC_LENGTH_SAMPLES = 30; // fine enough for an accurate piecewise-linear approximation of the fit's own arc length, regardless of window size
+
+  function computeFitKinematics(){
+    const n = points.length;
+    fitDerived = new Array(n).fill(null);
+    const R2D = 180/Math.PI;
+    const numPoints = parseInt(fitNumPointsInput.value, 10);
+    const degree = parseInt(fitDegreeInput.value, 10);
+    if(!Number.isFinite(numPoints) || numPoints < 2 || !Number.isFinite(degree) || degree < 1) return;
+    const numBefore = Math.floor(numPoints/2);
+    const numAfter = (numPoints-1) - numBefore;
+    for(let i=numBefore;i<=n-1-numAfter;i++){
+      const idxs = []; for(let k=-numBefore;k<=numAfter;k++) idxs.push(i+k);
+      const ts = idxs.map(k => points[k].t - points[i].t);
+      const xs = idxs.map(k => points[k].x);
+      const ys = idxs.map(k => points[k].y);
+      const cx = fitPolynomialLS(ts, xs, degree);
+      const cy = fitPolynomialLS(ts, ys, degree);
+      if(!cx || !cy) continue;
+      const vx = cx[1], vy = cy[1];
+      const ax = 2*cx[2], ay = 2*cy[2];
+      const speed = Math.sqrt(vx*vx + vy*vy);
+      const heading = (Math.atan2(vx, vy) * R2D + 360) % 360;
+      const cross = vx*ay - vy*ax;
+      const tanAccel = speed > 1e-6 ? (ax*vx + ay*vy)/speed : 0;
+      const centripetalAccel = speed > 1e-6 ? cross/speed : 0;
+      const curvature = speed > 1e-6 ? cross/(speed*speed*speed) : 0;
+
+      // Arc-length deviation: the fit's own path length (finely sampled,
+      // summed as a piecewise-linear approximation) minus the actual
+      // edge-based path length (straight-line sum between the real
+      // recorded points) over this same window. A snugly-fitting segment
+      // has these nearly equal; a problematic one (a crash-induced loop
+      // or excursion — see the earlier discussion) has the fit traveling
+      // much further than the real points did, showing up here as a
+      // large positive deviation — a direct, independent complement to
+      // watching individual points deviate from the fit's predicted
+      // speed.
+      let edgeArcLength = 0;
+      for(let k=1;k<idxs.length;k++){
+        const dx = points[idxs[k]].x - points[idxs[k-1]].x;
+        const dy = points[idxs[k]].y - points[idxs[k-1]].y;
+        edgeArcLength += Math.sqrt(dx*dx + dy*dy);
+      }
+      let fitArcLength = 0;
+      let prevX = evalPolynomial(cx, ts[0]), prevY = evalPolynomial(cy, ts[0]);
+      for(let s=1;s<=ARC_LENGTH_SAMPLES;s++){
+        const t = ts[0] + (ts[ts.length-1]-ts[0])*s/ARC_LENGTH_SAMPLES;
+        const X = evalPolynomial(cx, t), Y = evalPolynomial(cy, t);
+        fitArcLength += Math.sqrt((X-prevX)*(X-prevX) + (Y-prevY)*(Y-prevY));
+        prevX = X; prevY = Y;
+      }
+      const lengthDeviation = fitArcLength - edgeArcLength;
+
+      // Jerk: the fit's own 3rd derivative at the evaluation point —
+      // exactly 6*a3 (and 6*b3 for y), regardless of overall fit degree,
+      // since terms beyond the cubic coefficient don't affect the 3rd
+      // derivative's VALUE at t=0 (only how it varies away from t=0 —
+      // verified this holds for the current degree-5 default same as it
+      // would for any degree ≥3). A fit-based |tangentialJerk| edge check
+      // was tried in run detection (§4) and removed — too noisy in
+      // practice even on straight-ish segments, and separately unhelpful
+      // for its original motivating purpose (locating a jibe's true
+      // exit, where jerk tends to be low anyway). Kept here regardless,
+      // available on its own kinematics-chart plots (§7) alongside the
+      // raw finite-difference version (derived[].jerkMag, computed
+      // alongside acceleration, §3 pass 3) — genuinely useful to look at,
+      // even though neither ended up driving an automatic decision. The
+      // fit's own version stays meaningfully smoother than the raw one
+      // regardless of what uses it: it doesn't compound finite-difference
+      // noise the way twice-differencing raw positions does. Undefined
+      // (not zero) for degree < 3, where a 3rd derivative doesn't exist
+      // in the fitted polynomial at all — a real absence, not a zero
+      // reading.
+      let jerkMag = null, tangentialJerk = null, centripetalJerk = null;
+      if(degree >= 3){
+        const jerkX = 6*cx[3], jerkY = 6*cy[3];
+        jerkMag = Math.sqrt(jerkX*jerkX + jerkY*jerkY);
+        tangentialJerk = speed > 1e-6 ? (jerkX*vx + jerkY*vy)/speed : 0;
+        centripetalJerk = speed > 1e-6 ? (vx*jerkY - vy*jerkX)/speed : 0;
+      }
+
+      fitDerived[i] = { speed, heading, tanAccel, centripetalAccel, curvature, lengthDeviation, jerkMag, tangentialJerk, centripetalJerk, headingUnwrapped: null };
+    }
+    // Heading unwrap, same sequential approach as computeDerived's own pass.
+    let prevUnwrapped = null;
+    for(let i=0;i<n;i++){
+      if(!fitDerived[i]) continue;
+      const heading = fitDerived[i].heading;
+      let headingUnwrapped;
+      if(prevUnwrapped === null){
+        headingUnwrapped = heading;
+      } else {
+        let diff = heading - (prevUnwrapped % 360 + 360) % 360;
+        if(diff > 180) diff -= 360;
+        if(diff < -180) diff += 360;
+        headingUnwrapped = prevUnwrapped + diff;
+      }
+      fitDerived[i].headingUnwrapped = headingUnwrapped;
+      prevUnwrapped = headingUnwrapped;
+    }
   }
 
   // Does edge i span a true gap — wider than dtMaxVar (beyond what this
@@ -1020,6 +1311,89 @@
   }
 
   // Circular heading difference, normalized to (-180, 180].
+  // Least-squares polynomial fit y(t) = c[0] + c[1]*t + c[2]*t^2 + ...,
+  // solved via the normal equations (Gaussian elimination with partial
+  // pivoting). Small, fixed-size systems only (order 3 in current use),
+  // so a direct solve is simple and fast enough — no need for a general
+  // linear-algebra library for this. Returns null for a degenerate
+  // system (e.g. duplicate t values, which duplicate-timestamp cleanup
+  // should already prevent, but this stays defensive regardless).
+  function fitPolynomialLS(ts, ys, order){
+    const n = ts.length, p = order+1;
+    const ATA = Array.from({length:p}, () => Array(p).fill(0));
+    const ATy = Array(p).fill(0);
+    for(let i=0;i<n;i++){
+      const t = ts[i], y = ys[i];
+      const row = []; for(let k=0;k<p;k++) row.push(Math.pow(t,k));
+      for(let a=0;a<p;a++){
+        ATy[a] += row[a]*y;
+        for(let b=0;b<p;b++) ATA[a][b] += row[a]*row[b];
+      }
+    }
+    for(let col=0; col<p; col++){
+      let piv = col;
+      for(let r=col+1; r<p; r++) if(Math.abs(ATA[r][col]) > Math.abs(ATA[piv][col])) piv = r;
+      [ATA[col], ATA[piv]] = [ATA[piv], ATA[col]];
+      [ATy[col], ATy[piv]] = [ATy[piv], ATy[col]];
+      if(Math.abs(ATA[col][col]) < 1e-12) return null;
+      for(let r=0; r<p; r++){
+        if(r===col) continue;
+        const f = ATA[r][col]/ATA[col][col];
+        for(let c=col;c<p;c++) ATA[r][c] -= f*ATA[col][c];
+        ATy[r] -= f*ATy[col];
+      }
+    }
+    return ATy.map((v,i) => v/ATA[i][i]);
+  }
+  function evalPolynomial(coefs, t){
+    let s = 0;
+    for(let k=0;k<coefs.length;k++) s += coefs[k]*Math.pow(t,k);
+    return s;
+  }
+
+  // Fits a polynomial curve (x(t) and y(t) separately, least-squares —
+  // window size and degree both user-configurable, same
+  // fitNumPointsInput/fitDegreeInput as computeFitKinematics) through a
+  // window built around the current selection g using the same
+  // numBefore/numAfter formula as that function — see there for the full
+  // reasoning — then samples it at higher granularity for smooth
+  // drawing across the full window. Sample count scales with the window
+  // itself (3x the point count) rather than staying fixed, so widening
+  // the fit window doesn't leave the drawn curve visibly under-sampled
+  // relative to it. Does not skip windows spanning a true gap either,
+  // matching that function — an odd-looking loop/excursion on the map
+  // near a crash is accepted as a cosmetic quirk rather than losing real
+  // kinematics there. Time values are re-centered on the selected
+  // point's own timestamp before fitting, for numerical stability at
+  // higher polynomial degrees. Returns null near the very start/end of
+  // the track, where the full window isn't available — no shrunk-window
+  // fallback, matching how other diagnostics here degrade to "nothing
+  // shown" rather than a lower-confidence partial version.
+  function computeLocalCubicFit(){
+    const c = selected;
+    const numPoints = parseInt(fitNumPointsInput.value, 10);
+    const degree = parseInt(fitDegreeInput.value, 10);
+    if(!Number.isFinite(numPoints) || numPoints < 2 || !Number.isFinite(degree) || degree < 1) return null;
+    const numBefore = Math.floor(numPoints/2);
+    const numAfter = (numPoints-1) - numBefore;
+    if(c-numBefore < 0 || c+numAfter >= points.length) return null;
+    const idxs = []; for(let k=-numBefore;k<=numAfter;k++) idxs.push(c+k);
+    const ts = idxs.map(i => points[i].t - points[c].t);
+    const xs = idxs.map(i => points[i].x);
+    const ys = idxs.map(i => points[i].y);
+    const cx = fitPolynomialLS(ts, xs, degree);
+    const cy = fitPolynomialLS(ts, ys, degree);
+    if(!cx || !cy) return null;
+    const tMin = ts[0], tMax = ts[ts.length-1];
+    const numSamples = numPoints * 3;
+    const curve = [];
+    for(let k=0;k<numSamples;k++){
+      const t = tMin + (tMax-tMin)*k/(numSamples-1);
+      curve.push({ x: evalPolynomial(cx,t), y: evalPolynomial(cy,t) });
+    }
+    return curve;
+  }
+
   function headingDiff(a, b){
     let d = a - b;
     d = ((d % 360) + 540) % 360 - 180;
@@ -1047,18 +1421,6 @@
     return null;
   }
 
-  // Circular mean heading over points[startIdx..endIdx] inclusive — averages
-  // unit vectors (sin,cos) rather than raw degrees, so it handles the 0/360
-  // wrap correctly (same atan2(x,y) compass convention used everywhere else).
-  function circularMeanHeading(startIdx, endIdx){
-    let sx=0, sy=0, n=0;
-    for(let j=startIdx;j<=endIdx;j++){
-      const h = derived[j].heading * Math.PI/180;
-      sx += Math.sin(h); sy += Math.cos(h); n++;
-    }
-    return (Math.atan2(sx/n, sy/n) * 180/Math.PI + 360) % 360;
-  }
-
   // A "run" is a stretch where the general point of sail stays consistent.
   // Edge-based: "edge i" is the segment from point i-1 to point i; its
   // velocity/heading is derived[i]. curvature(i) describes the TRANSITION
@@ -1069,17 +1431,22 @@
   //   2. Accumulate warm-up edges from the break point until minSec is
   //      covered.
   //   3. Every warm-up edge must agree with the window's own narrow-angle
-  //      average, and pass the speed/device-disagreement check. Either
+  //      average, and pass the speed/gap check. Either
   //      failing ANY edge aborts warm-up — slide the break point +1, retry
   //      the whole window from scratch.
-  //   4. Curvature is checked at every vertex EXCEPT the window's own start:
-  //      the start is already a break point, so it's expected/allowed to
-  //      have high or undefined curvature there — that's what makes it a
-  //      break in the first place. An INNER vertex failing curvature aborts
-  //      warm-up entirely (same as step 3). But if curvature fails exactly
-  //      at the window's own END, that's not a failure — it just means this
-  //      is a minimal candidate run, terminating right there; skip extension
-  //      and go straight to committing it.
+  //   4. Curvature, tangential-accel deviation, and fit centripetal
+  //      acceleration are all checked at EVERY vertex in the window,
+  //      including its own start (the break point itself) and its own
+  //      end — no exemptions. Any failure anywhere aborts warm-up
+  //      entirely (same as step 3): slide the break point forward, retry
+  //      the whole window from scratch. The break point's own vertex
+  //      used to be exempt — "it's already a break point, so high or
+  //      undefined curvature there is expected, that's what makes it a
+  //      break" — and a failure exactly at the window's own end used to
+  //      be treated as a minimal, valid run rather than a failure.
+  //      Removed both: if the break point's own vertex is still carrying
+  //      real curvature/deviation/centripetal-acceleration, warm-up is
+  //      starting from a point that hasn't genuinely settled either.
   //   5. Otherwise, extend one point at a time against the FIXED warm-up
   //      reference: if the new edge fails heading or speed, its start point
   //      becomes the run's end (the edge and its own end point are
@@ -1110,96 +1477,273 @@
     const wideT = parseFloat(runBreakHeadingThreshInput.value) || 0;
     const curvT = parseFloat(runCurvThreshInput.value);
     const lowSpeedT = parseFloat(runLowSpeedThreshInput.value);
-    const deviceDisagreeT = parseFloat(runDeviceDisagreeThreshInput.value);
+    const accelDevT = parseFloat(runAccelDeviationThreshInput.value);
+    const warmupCentripetalAccelT = parseFloat(runWarmupCentripetalAccelThreshInput.value);
+    const minEdges = parseInt(runMinEdgesInput.value, 10) || 1;
 
+    // A straight-line-corridor check (fits a line through the window's own
+    // points, flags a point straying too far perpendicular to it) lived
+    // here for a while, meant to catch a path shape the narrow-angle
+    // heading check alone can miss — a small, consistent zigzag, every
+    // edge individually within the narrow angle, but the path visibly
+    // wandering. Removed once fitCentripetalAccelFails (below) existed
+    // alongside it: for a warm-up-sized window at ordinary sailing speed,
+    // bounding centripetal acceleration at every vertex already implies a
+    // bound on how far the path can stray from straight — confirmed
+    // directly, a synthetic zigzag with each individual bend held just
+    // under the centripetal threshold produced a corridor deviation of
+    // only ~0.5m, well under the corridor check's own former default
+    // (2m). The two checks were catching largely the same thing by the
+    // end, and the corridor check's own threshold was the harder one to
+    // tune well — set too tight, it started excluding genuinely
+    // reasonable warm-up/warm-down windows and visibly widening
+    // transition zones, while the visible difference between a loose and
+    // a tight setting was otherwise small.
+
+    // Reads fitDerived's own smoothed curvature (§7), not derived's raw
+    // one — speed (edgeFails, below) reads the fit too, but heading
+    // deliberately reverted back to derived's edge-based version: the
+    // fit's path can genuinely loop near a true gap, which is a harmless
+    // cosmetic quirk for a map display but a real problem for a
+    // direction reading a run boundary actually depends on. Curvature
+    // itself doesn't carry that same risk in practice — it's a
+    // magnitude, not a direction, so a gap-induced loop inflates it
+    // rather than silently pointing it the wrong way.
     function curvatureFails(i){
-      const d = derived[i];
-      if(!d || d.curvature == null) return false; // undefined ≠ failure
-      return Math.abs(d.curvature) >= curvT;
+      const f = fitDerived[i];
+      if(!f || f.curvature == null) return false; // undefined ≠ failure
+      return Math.abs(f.curvature) >= curvT;
     }
-    // Edge-level check: too slow to still be "sailing," (when device speed
-    // exists) the derived and device speed have diverged too far to trust this
-    // edge, or the edge spans a true gap (wider than dtMaxVar — beyond what
-    // this device's normal variable-rate sampling looks like, so treated as
-    // a genuine dropout rather than just a slower sample).
+    // Vertex-level, like curvatureFails, not edge-level like edgeFails —
+    // deliberately: derived[i].tanAccel is attributed to vertex i itself
+    // (the transition BETWEEN edge i-1,i and edge i,i+1 — see §3), so a
+    // large deviation from the fit's own tanAccel at that vertex means
+    // the edge STARTING at i (not the one ending there) is the one
+    // actually responsible for the anomalous acceleration reading.
+    // During EXTENSION specifically, this shows up as: vertex i and its
+    // own incoming edge stay trustworthy either way — only the outgoing
+    // edge is implicated, so unlike edgeFails, nothing there excludes the
+    // point itself, only what would extend past it. During WARM-UP,
+    // though, a hit anywhere in the window (including its own start and
+    // end) is a hard failure of the WHOLE candidate window, not just a
+    // stopping point — warm-up is asking "is this whole window already
+    // settled," not "where does extension stop," so there's no partial
+    // credit for the window's own earlier vertices once any one of them
+    // fails.
+    function tanAccelDeviationFails(i){
+      const d = derived[i], f = fitDerived[i];
+      if(!d || d.tanAccel == null || !f || f.tanAccel == null) return false; // undefined ≠ failure
+      return Math.abs(d.tanAccel - f.tanAccel) >= accelDevT;
+    }
+    // A different kind of check from the two above — deliberately used
+    // ONLY in warm-up (step 3/4) and trailing straightness (step 6), never
+    // during extension (step 5). Centripetal acceleration alone was tried
+    // much earlier in this project as a general transition-detection
+    // signal and abandoned — it flagged ordinary tactical heading
+    // changes too, since a deliberate, gentle course adjustment mid-run
+    // has real centripetal acceleration too, just not enough to be a
+    // maneuver. Scoping it to warm-up/warm-down only sidesteps that
+    // failure mode entirely: extension still tolerates it freely (a run
+    // can have a mild tactical wiggle in its own interior without
+    // breaking), and this only ever governs where a run's START and END
+    // get positioned once something else has ALREADY decided a break
+    // belongs there. That distinction matters for exactly the case this
+    // is meant to catch: a walk-back-terminated run's own last vertex is,
+    // by construction, wherever curvature peaked — so it's often still
+    // carrying real centripetal acceleration even though it already
+    // passed the narrow-angle/curvature/corridor checks (confirmed
+    // against a real track: many walk-back run endpoints measured
+    // 2-4 m/s² of fit centripetal acceleration right at runEnd, well
+    // over this threshold, even though everything else about that vertex
+    // already looked acceptable). This check exists to catch that
+    // specifically and pull the boundary back a little further, past the
+    // peak itself, to wherever the fit's own curve has genuinely settled
+    // — not to decide whether a break happens at all.
+    function fitCentripetalAccelFails(i){
+      const f = fitDerived[i];
+      if(!f || f.centripetalAccel == null) return false; // undefined ≠ failure
+      return Math.abs(f.centripetalAccel) >= warmupCentripetalAccelT;
+    }
+    // Edge-level check: too slow to still be "sailing," or the edge spans
+    // a true gap (wider than dtMaxVar — beyond what this device's normal
+    // variable-rate sampling looks like, so treated as a genuine dropout
+    // rather than just a slower sample). No longer checks device-speed
+    // disagreement — turned out unnecessary for run detection specifically:
+    // the low-speed and curvature/heading checks already catch the same
+    // real problems a disagreement would flag, without needing device
+    // speed to be present at all. (edgeGradientExcluded, a separate
+    // concern — whether to trust an edge's speed for display/stats — still
+    // uses its own device-disagreement check; that one wasn't touched.)
+    //
+    // A jerk-based edge check (fit-based |tangentialJerk|, replacing an
+    // even earlier vertex-level fit-accel-magnitude attempt) was also
+    // tried here and removed — not a data-quality problem this time, a
+    // real-world discrimination failure: too noisy in practice even on
+    // genuinely straight-ish segments to set a useful threshold, and
+    // separately unhelpful for its original motivating purpose (locating
+    // a jibe's true exit) since exit jerk tends to be low anyway — so it
+    // ended up making warm-up/warm-down effectively stricter without
+    // reliably locating what it was meant to. The narrow-angle heading
+    // check remains the practical, working constraint for straightness.
+    // Both jerk kinematics (§3 pass 3's edge-based version, §7's smoothed
+    // fit-based one) and their kinematics-chart plots stay — genuinely
+    // useful to look at, just not usable as an automatic pass/fail gate.
+    //
+    // Uses fitDerived's own smoothed speed (§7), not derived's raw one —
+    // a genuine judgment call, unlike the heading/curvature switch above:
+    // a smoothed reading could in principle blur over a brief, real
+    // stall, but a noisy raw reading can just as easily produce a false
+    // one from a single bad position fix — decided in favor of the fit
+    // for consistency with every other check here now reading the same
+    // smoothed source.
     function edgeFails(i){
-      const d = derived[i];
-      if(!d) return false;
-      if(d.speed <= lowSpeedT) return true;
-      const p = points[i];
-      if(p.rawSpeed != null && !Number.isNaN(p.rawSpeed) && (d.speed - p.rawSpeed) >= deviceDisagreeT) return true;
+      const f = fitDerived[i];
+      if(!f || f.speed == null) return false; // undefined ≠ failure
+      if(f.speed <= lowSpeedT) return true;
       if(edgeGapFails(i)) return true;
       return false;
     }
     function pointUsable(i){
-      return !!derived[i];
+      return !!derived[i] && !!fitDerived[i];
     }
 
     let breakPoint = firstValid;
     while(breakPoint <= lastValid){
       if(!pointUsable(breakPoint)){ breakPoint++; continue; }
 
-      // --- accumulate warm-up edges until minSec is covered ---
+      // --- accumulate warm-up edges until BOTH minSec and minEdges are
+      // covered — duration alone isn't enough on a variable-dt track,
+      // where a stretch of slower sampling could satisfy minSec with too
+      // few actual points to trust an average heading computed from them ---
       let e = breakPoint, longEnough = true;
-      while(points[e].t - points[breakPoint].t < minSec){
+      while(points[e].t - points[breakPoint].t < minSec || (e - breakPoint) < minEdges){
         if(e+1 > lastValid || !pointUsable(e+1)){ longEnough = false; break; }
         e++;
       }
       if(!longEnough){ breakPoint++; continue; }
 
-      // --- heading + speed must hold for every warm-up edge ---
-      const avg = circularMeanHeading(breakPoint+1, e);
+      // --- heading + speed must hold for every warm-up edge. Bounds the
+      // window's own headingUnwrapped RANGE (max−min) directly rather
+      // than computing an average and checking each point's distance
+      // from it — same reasoning as extension's own switch to range-
+      // based tracking (above): an average is one number summarizing
+      // the window, so it can't itself detect the window failing to be
+      // internally consistent the way a direct range bound can. Reads
+      // derived's own edge-based heading, not fitDerived's — see
+      // curvatureFails' own comment for why this specifically reverted
+      // back from a fit-based version. ---
+      let warmupMin = Infinity, warmupMax = -Infinity;
       let warmupOk = true;
       for(let j=breakPoint+1;j<=e;j++){
-        if(Math.abs(headingDiff(derived[j].heading, avg)) >= narrowT){ warmupOk = false; break; }
+        const d = derived[j];
+        if(d && d.headingUnwrapped != null){
+          if(d.headingUnwrapped < warmupMin) warmupMin = d.headingUnwrapped;
+          if(d.headingUnwrapped > warmupMax) warmupMax = d.headingUnwrapped;
+          if((warmupMax - warmupMin) >= narrowT){ warmupOk = false; break; }
+        }
         if(edgeFails(j)){ warmupOk = false; break; }
       }
+      if(warmupOk && warmupMax === -Infinity) warmupOk = false; // no valid heading data in the window at all
       if(!warmupOk){ breakPoint++; continue; }
 
-      // --- curvature: every vertex except the window's own start; its own
-      // end gets special handling (minimal run) instead of a hard failure ---
-      let curvatureFailedAtEnd = false;
-      for(let j=breakPoint+1;j<=e;j++){
-        if(curvatureFails(j)){
-          if(j === e){ curvatureFailedAtEnd = true; break; }
-          warmupOk = false; break; // inner vertex — hard failure
-        }
+      // --- curvature, accel-deviation, and fit centripetal acceleration:
+      // EVERY vertex in the window, including its own start (the break
+      // point) and its own end — no exemptions, no minimal-run special
+      // case anymore. Any failure anywhere is a hard failure of the
+      // whole window: slide the break point forward and retry from
+      // scratch.
+      //
+      // The break point's own vertex USED to be exempt here — the
+      // reasoning was that it's already a break point, so high or
+      // undefined curvature there was "expected, that's what makes it a
+      // break in the first place." Removed: if a break point's own
+      // vertex is still carrying real curvature/tangential-accel-
+      // deviation/centripetal-acceleration, warm-up is starting from a
+      // point that hasn't actually settled yet either — the same
+      // reasoning that already drives pulling warm-down's own boundary
+      // back past its own tail-end curvature peak, just applied
+      // symmetrically to the other end. The end-of-window "minimal run"
+      // special case is gone along with it, for the same reason: a
+      // vertex-level failure exactly at the window's own end isn't "a
+      // valid, if short, run ending right here" anymore, it's just
+      // another unsettled vertex — endFailReason stays permanently null
+      // now, so the extension step below (gated on it) always runs.
+      let endFailReason = null;
+      for(let j=breakPoint;j<=e;j++){
+        if(curvatureFails(j) || tanAccelDeviationFails(j) || fitCentripetalAccelFails(j)){ warmupOk = false; break; }
       }
       if(!warmupOk){ breakPoint++; continue; }
 
       let runEnd = e;
-      let terminationReason = curvatureFailedAtEnd ? 'curvature' : null;
-      let wasWalkedBack = false; // distinguishes a walk-back-triggered curvature termination from a direct one (curvatureFails(k) during extension, or curvatureFailedAtEnd) — only the former is eligible for the reconnection pass below
+      let terminationReason = endFailReason;
+      let wasWalkedBack = false; // distinguishes a walk-back-triggered curvature termination from a direct one (curvatureFails(k)/tanAccelDeviationFails(k) during extension, or an end-of-warm-up failure) — only the former is eligible for the reconnection pass below
 
-      if(!curvatureFailedAtEnd){
+      if(!endFailReason){
+        // Range (max-min) of headingUnwrapped across the run so far,
+        // seeded from the warm-up window's own spread (breakPoint+1 to e
+        // — the same range warm-up's own narrow-angle loop validated) and
+        // extended incrementally as each new point joins. This is
+        // strictly stricter than comparing each new point against the
+        // fixed warm-up avg alone: avg is just one number summarizing the
+        // window, so a candidate could sit within wideT of avg while the
+        // window's own internal spread plus that candidate's distance
+        // together exceed wideT. Confirmed directly: a warm-up window
+        // with heading -5°/0°/+5° (avg 0°, its own range already 10°)
+        // and a candidate at 85° passes the avg-only comparison
+        // (|85-0|=85 < 90) but fails a max-min comparison over the whole
+        // range (90 ≥ 90) — the same principle the reconnection pass
+        // already uses for exactly this reason (§4's reconnection
+        // section has the full history of why range-based beats
+        // average-based for this kind of check). Unifying extension onto
+        // it removes a second, subtly different formulation of "how far
+        // has heading drifted" that had been coexisting with the
+        // reconnection pass's own, stricter one.
+        let runMin = Infinity, runMax = -Infinity;
+        for(let j=breakPoint+1;j<=e;j++){
+          const h = derived[j].headingUnwrapped;
+          if(h == null) continue;
+          if(h < runMin) runMin = h;
+          if(h > runMax) runMax = h;
+        }
         let k = e+1;
-        let maxCurvIdx = null, maxCurvMag = -1; // best candidate for "where the actual turn happened," tracked during extension only
+        let maxAccelIdx = null, maxAccelMag = -1; // best candidate for "where the actual turn happened," tracked during extension only
         while(k <= lastValid && pointUsable(k)){
-          const headingBad = Math.abs(headingDiff(derived[k].heading, avg)) >= wideT;
+          const kHeading = derived[k].headingUnwrapped;
+          const candidateMin = Math.min(runMin, kHeading), candidateMax = Math.max(runMax, kHeading);
+          const headingBad = (candidateMax - candidateMin) >= wideT;
           const speedBad = edgeFails(k);
           if(headingBad || speedBad){
-            if(headingBad && maxCurvIdx !== null){
-              // Walk back to wherever curvature peaked during this
-              // extension, rather than stopping wherever the CUMULATIVE
-              // deviation from the fixed reference finally crossed the wide
-              // angle. That crossing point can sit well past the actual
-              // turn — curvature may have spiked early, with the boat
-              // drifting close to straight for a while afterward before the
-              // cumulative effect alone tripped the threshold. This also
-              // means a real but gradual tactical shift that never spikes
-              // curvature sharply enough to trip the per-point check, and
-              // never quite reaches the full 60° either, still gets located
-              // at its truest turning point once the cumulative drift
-              // eventually does cross — rather than breaking (if at all)
-              // at an arbitrary, possibly locally-straight point.
-              runEnd = maxCurvIdx;
+            if(headingBad && maxAccelIdx !== null){
+              // Walk back to wherever fit CENTRIPETAL ACCELERATION peaked
+              // during this extension — not curvature — rather than
+              // stopping wherever the CUMULATIVE deviation from the fixed
+              // reference finally crossed the wide angle. That crossing
+              // point can sit well past the actual turn — the peak may
+              // have happened early, with the boat drifting close to
+              // straight for a while afterward before the cumulative
+              // effect alone tripped the threshold. This also means a
+              // real but gradual tactical shift that never spikes sharply
+              // enough to trip the per-point curvature check, and never
+              // quite reaches the full wide angle either, still gets
+              // located at its truest turning point once the cumulative
+              // drift eventually does cross — rather than breaking (if at
+              // all) at an arbitrary, possibly locally-straight point.
+              //
+              // Centripetal acceleration over curvature specifically: a
+              // subtle difference, but centripetal acceleration (curvature
+              // × speed²) is the more physically representative signal for
+              // "was this an intentional turn" — the same geometric bend
+              // taken at low speed barely registers as a felt turn at all,
+              // while the same bend at speed is a real, forceful direction
+              // change. Curvature alone can't distinguish those two.
+              runEnd = maxAccelIdx;
               terminationReason = 'curvature'; // we've now attributed this to a real turning point, not just cumulative drift
               wasWalkedBack = true;
             } else if(headingBad){
               terminationReason = 'heading';
             } else {
-              // speedBad: distinguish a genuine data gap from low-speed/
-              // device-disagreement — a gap specifically is the signal used
+              // speedBad: distinguish a genuine data gap from low-speed —
+              // a gap specifically is the signal used
               // to identify a crash/dropout downstream (see transition
               // classification), so it needs its own distinct reason rather
               // than being lumped in as generic 'velocity'.
@@ -1208,55 +1752,78 @@
             break; // k excluded — runEnd stays at its previous (possibly walked-back) value
           }
           runEnd = k; // edge passed — k joins the run
-          const cMag = derived[k].curvature != null ? Math.abs(derived[k].curvature) : -1;
-          if(cMag >= maxCurvMag){ maxCurvMag = cMag; maxCurvIdx = k; } // >= : ties favor the LATEST point, so uniform/constant-rate drift (no distinct peak) preserves the original wide-angle-tolerant stopping point instead of collapsing back to the first point of the drift
+          runMin = candidateMin; runMax = candidateMax;
+          const aMag = fitDerived[k].centripetalAccel != null ? Math.abs(fitDerived[k].centripetalAccel) : -1;
+          if(aMag >= maxAccelMag){ maxAccelMag = aMag; maxAccelIdx = k; } // >= : ties favor the LATEST point, so uniform/constant-rate drift (no distinct peak) preserves the original wide-angle-tolerant stopping point instead of collapsing back to the first point of the drift
           if(curvatureFails(k)){
             terminationReason = 'curvature';
             break; // k stays included, but stop extending past it
+          }
+          if(tanAccelDeviationFails(k)){
+            terminationReason = 'accelDeviation';
+            break; // k stays included (its own incoming edge is fine) — only the edge that would extend past it is implicated
           }
           k++;
         }
       }
 
-      // Trailing straightness check: the run's tail — its last runTailEdges
-      // edges — must be internally consistent at the NARROW angle, same
-      // standard warm-up itself was held to. The wide-angle extend phase
-      // above allows a lot of drift from the ORIGINAL reference before it
-      // triggers a hard break, so a run can end with its last few points
-      // already gradually drifting into what will become the next turn,
-      // without ever tripping the wide threshold. If the tail alone isn't
+      // Trailing straightness check: the run's tail must be internally
+      // consistent at the NARROW angle, same standard warm-up itself was
+      // held to. The wide-angle extend phase above allows a lot of drift
+      // from the run's own accumulated range before it triggers a hard
+      // break, so a run can end with its last few points already
+      // gradually drifting into what will become the next turn, without
+      // ever tripping the wide threshold. If the tail alone isn't
       // self-consistent, shrink the run by one point and retry — down to
       // (never below) the warm-up window's own end, which was already
       // separately validated.
       const warmupEnd = e;
-      const tailEdges = parseInt(runTailSampleEdgesInput.value,10) || 1;
       while(runEnd > warmupEnd){
-        const tailStart = Math.max(breakPoint+1, runEnd - tailEdges + 1);
-        const tailAvg = circularMeanHeading(tailStart, runEnd);
+        // Tail window sized exactly like warm-up's own accumulation
+        // (minEdges/minSec — no separate tail-specific control), just
+        // built backward from runEnd instead of forward from a break
+        // point: start at minEdges edges, then expand further back if
+        // that isn't yet enough to also cover minSec — so a variable-dt
+        // track's slower-sampled stretches still get enough points for a
+        // trustworthy local check, the same reasoning warm-up itself
+        // uses.
+        let tailStart = Math.max(breakPoint+1, runEnd - minEdges + 1);
+        while(tailStart > breakPoint+1 &&
+              (points[runEnd].t - points[tailStart].t < minSec || (runEnd - tailStart) < minEdges - 1)){
+          tailStart--;
+        }
+        // Same range (max−min) approach as warm-up's own heading check
+        // above, not an average — see that block's own comment for why.
+        let tailMin = Infinity, tailMax = -Infinity;
         let tailOk = true;
         for(let j=tailStart;j<=runEnd;j++){
-          if(Math.abs(headingDiff(derived[j].heading, tailAvg)) >= narrowT){ tailOk = false; break; }
+          const d = derived[j];
+          if(d && d.headingUnwrapped != null){
+            if(d.headingUnwrapped < tailMin) tailMin = d.headingUnwrapped;
+            if(d.headingUnwrapped > tailMax) tailMax = d.headingUnwrapped;
+            if((tailMax - tailMin) >= narrowT){ tailOk = false; break; }
+          }
+          if(fitCentripetalAccelFails(j)){ tailOk = false; break; }
         }
+        if(tailOk && tailMax === -Infinity) tailOk = false; // no valid heading data in the window at all
         if(tailOk) break;
         runEnd--;
       }
 
       const duration = points[runEnd].t - points[breakPoint].t;
       if(duration >= minRunDuration){
-        // Report the run pulled back by one edge on each side. The break
-        // point itself is exempt from every validation check (that
-        // exemption is exactly what allows it to BE a break point), so its
-        // own edge may not represent settled, steady-state sailing — and a
-        // run's last edge, if added during extension, was only held to the
-        // WIDE angle, not the narrow one. Giving back one edge at each end
-        // means downstream transition analysis (jibe classification etc.)
-        // gets these edges automatically as part of the transition zone,
-        // instead of needing separate lead-in/lead-out lookups into the
-        // adjacent run's own boundary.
-        let reportStart = breakPoint + 1, reportEnd = runEnd - 1;
-        if(reportStart > reportEnd){ reportStart = breakPoint; reportEnd = runEnd; } // too short to shrink — keep full extent rather than go degenerate
-        runs.push({startIdx: reportStart, endIdx: reportEnd, startT: points[reportStart].t, endT: points[reportEnd].t, duration: points[reportEnd].t-points[reportStart].t, terminationReason, wasWalkedBack});
-        breakPoint = runEnd; // shared boundary uses the FULL validated extent, not the shrunk report
+        // Report the run's full validated extent directly — no
+        // reporting-layer shrinking. An earlier version pulled the
+        // reported boundary back by one edge on each side, on the
+        // reasoning that the break point's own edge (exempt from every
+        // check) and a wide-angle-only final edge might not represent
+        // settled sailing, and that giving them to the adjacent
+        // transition zone saved downstream lookups. Removed for
+        // consistency: warm-up/extension/warm-down (and walk-back) are
+        // what decide where a run actually starts and ends: no separate
+        // reporting-layer adjustment on top of that decision.
+        runs.push({startIdx: breakPoint, endIdx: runEnd, startT: points[breakPoint].t, endT: points[runEnd].t, duration, terminationReason, wasWalkedBack});
+        breakPoint = runEnd;
       } else {
         // Abandoned: resume point depends on why it ended.
         breakPoint = (terminationReason === 'heading') ? (breakPoint + 1) : runEnd;
@@ -1268,32 +1835,77 @@
     // deviation (a gentle jibe entry, say), only distinguishable from noise
     // in hindsight once both sides of the break are known. So: revisit
     // every run that ended via a walk-back, and reconnect it with the next
-    // run if (a) lead-in and lead-out differ by less than reconnectAngle
-    // (its own threshold, not the warm-up narrow angle — this is a
-    // deliberately looser bar, since the two sides of a real gentle jibe
-    // entry can differ more than warm-up's own strict self-consistency
-    // standard while still clearly being "basically the same run") and
-    // (b) nothing else in the transition zone would have disqualified it
-    // anyway (a genuine gap, stall, device disagreement, or a curvature
-    // spike past runCurvThresh). Iterates to a fixed point since a
-    // reconnected run can itself have inherited a walk-back flag from its
-    // new right-hand side, enabling a further chained merge.
-    const reconnectAngle = parseFloat(reconnectAngleInput.value) || 0;
-    let merged = true;
+    // run if (a) headingUnwrapped's own range (max−min) across the whole
+    // CANDIDATE MERGED range stays under the wide angle, and (b) nothing
+    // else in the transition zone would have disqualified it anyway (a
+    // genuine gap, stall, a curvature spike past runCurvThresh, or a
+    // tangential-accel deviation past runAccelDeviationThresh).
+    //
+    // This went through two earlier, less robust versions before landing
+    // here, each replaced after a real failure case surfaced its specific
+    // blind spot:
+    //
+    // 1. Originally checked lead-in/lead-out heading (the two runs' own
+    //    reported boundary points) against a separate, looser
+    //    reconnectAngle threshold. Failed on a jibe gradual enough that no
+    //    single edge-to-edge step exceeds much, but the CUMULATIVE course
+    //    change across the whole transition is a genuine, large reversal —
+    //    confirmed with a synthetic 2.5°/point gradual jibe: boundary
+    //    difference measured only 12.5° (would have silently reconnected),
+    //    against a genuine 137.5° overall change.
+    // 2. Replaced with comparing the candidate range's own warm-up
+    //    average (a circular mean over its first few edges) against its
+    //    own warm-down average (same, over its last few) against the wide
+    //    angle directly, plus a peak-deviation "overshoot" check across
+    //    the full range for double-backs. Failed on a REAL track: three
+    //    consecutive walked-back runs, each independently a genuine
+    //    ~90°+ turn, chain-merged in two pairwise steps that each looked
+    //    individually fine. The deeper problem, once traced: a circular
+    //    mean of several edges can itself understate a turn — three
+    //    edges turning 60° at each vertex (0°→60°→120°, a genuine 120°
+    //    turn) average to a warm-up of 30° and a warm-down of 90°, a
+    //    circular-mean "difference" of only 60°, quietly losing a third
+    //    of the real rotation before the comparison even runs.
+    //
+    // headingUnwrapped (§3) sidesteps both failure modes directly, since
+    // it's built exactly to avoid this: a continuous, non-wrapping,
+    // sequentially-accumulated heading — not an angle mod 360°, and never
+    // averaged. Its own range across the candidate merged range answers
+    // the actual question directly — "how far did heading ever swing, in
+    // total, in either direction, anywhere in this range" — with no
+    // circular-averaging dilution (case 2's failure) and no reliance on
+    // any two single boundary points (case 1's). Verified against the
+    // real track that broke case 2: the 232° range measured for that
+    // candidate merge — comfortably over the 90° wide angle — is already
+    // apparent from just the FIRST of the two chained merges alone, so
+    // this catches the problem at its earliest point, not just eventually.
+    // Also reuses the wide angle itself rather than a separate, bespoke
+    // reconnection-only threshold — same "would this qualify as one run
+    // on its own merits" standard as everywhere else in this state
+    // machine, not a special case.
+    //
+    // Iterates to a fixed point since a reconnected run can itself have
+    // inherited a walk-back flag from its new right-hand side, enabling a
+    // further chained merge.
+    let merged = reconnectEnabledInput.checked;
     while(merged){
       merged = false;
       for(let idx=0; idx<runs.length-1; idx++){
         const runA = runs[idx], runB = runs[idx+1];
         if(!runA.wasWalkedBack) continue;
 
-        const dIn = derived[runA.endIdx], dOut = derived[runB.startIdx];
-        if(!dIn || !dOut) continue;
-        const headingDev = Math.abs(headingDiff(dOut.heading, dIn.heading));
-        if(headingDev >= reconnectAngle) continue;
+        let mn = Infinity, mx = -Infinity;
+        for(let i=runA.startIdx+1; i<=runB.endIdx; i++){
+          const d = derived[i];
+          if(!d || d.headingUnwrapped == null) continue;
+          if(d.headingUnwrapped < mn) mn = d.headingUnwrapped;
+          if(d.headingUnwrapped > mx) mx = d.headingUnwrapped;
+        }
+        if(mx - mn >= wideT) continue;
 
         let disqualified = false;
         for(let i=runA.endIdx; i<=runB.startIdx; i++){
-          if(edgeFails(i) || curvatureFails(i)){ disqualified = true; break; }
+          if(edgeFails(i) || curvatureFails(i) || tanAccelDeviationFails(i)){ disqualified = true; break; }
         }
         if(disqualified) continue;
 
@@ -2001,15 +2613,39 @@
     const sessionTime = currentRuns.length > 0 ? formatHHMM(sessionDur) : '—';
     const runPct = sessionDur>0 ? (runDur/sessionDur*100) : 0;
 
+    // Session total length: summed edge distance across the same trimmed
+    // span as session duration (first run's start to last run's end) —
+    // every edge in that span, not just run-classified ones, matching
+    // session duration's own "the whole trimmed session," not a
+    // run-only sum.
+    let sessionLength = null;
+    if(currentRuns.length > 0){
+      const spanStart = currentRuns[0].startIdx, spanEnd = currentRuns[currentRuns.length-1].endIdx;
+      sessionLength = 0;
+      for(let i=spanStart+1; i<=spanEnd; i++){
+        const dx = points[i].x-points[i-1].x, dy = points[i].y-points[i-1].y;
+        sessionLength += Math.sqrt(dx*dx+dy*dy);
+      }
+    }
+
+    // Total crash/recovery duration: summed across every crash_recovery
+    // transition, so a session with several short dropouts and one with
+    // a single long one are visibly distinguishable, not just by count.
+    const crashDur = currentTransitions
+      .filter(t=>t.type==='crash_recovery')
+      .reduce((a,t)=>a + (points[t.transitionEnd].t - points[t.transitionStart].t), 0);
+
     // Speed restricted to edges that are part of a run, a jibe, or a
     // tack — deliberately excludes failed attempts, crash/recovery, and
     // anything unclassified, so a stall or a gap-triggered crash edge
     // can't inflate (or corrupt) the reported maximum.
-    const derivedSpeeds = [], deviceSpeeds = [];
+    const derivedSpeeds = [], fitSpeeds = [], deviceSpeeds = [];
     function collectSpeedRange(startIdx, endIdx){
       for(let i=startIdx+1; i<=endIdx; i++){
         const d = derived[i];
         if(d && d.speed != null) derivedSpeeds.push(d.speed);
+        const f = fitDerived[i];
+        if(f && f.speed != null) fitSpeeds.push(f.speed);
         const rs = points[i].rawSpeed;
         if(rs != null && !Number.isNaN(rs)) deviceSpeeds.push(rs);
       }
@@ -2019,6 +2655,7 @@
       if(tr.type === 'jibe' || tr.type === 'tack') collectSpeedRange(tr.transitionStart, tr.transitionEnd);
     });
     const derivedMaxSpeed = derivedSpeeds.length ? Math.max(...derivedSpeeds) : null;
+    const fitMaxSpeed = fitSpeeds.length ? Math.max(...fitSpeeds) : null;
     const deviceMaxSpeed = deviceSpeeds.length ? Math.max(...deviceSpeeds) : null;
 
     statsBar.innerHTML = `
@@ -2028,11 +2665,15 @@
       <span style="flex-basis:100%; height:0;"></span>
       <span style="color:var(--dim); margin-left:2px;">Processed:</span>
       <span><b>${sessionTime}</b> session duration</span>
+      <span><b>${sessionLength!=null ? formatLength(sessionLength) : '—'}</b> session length</span>
       <span><b style="color:var(--good)">${currentRuns.length}</b> runs (<b style="color:var(--good)">${runPct.toFixed(0)}%</b> of session time)</span>
       <span><b style="color:#c77dff">${jibeCount}</b> jibes, <b style="color:#ff9d4d">${failedJibeCount}</b> failed</span>
       <span><b style="color:#2dd4bf">${tackCount}</b> tacks, <b style="color:#ff5d9e">${failedTackCount}</b> failed</span>
-      <span><b style="color:#8a5a5a">${crashCount}</b> crash/recovery</span>
-      <span><b>${derivedMaxSpeed!=null ? formatSpeed(derivedMaxSpeed) : '—'}</b> max derived${deviceMaxSpeed!=null ? ` / <b>${formatSpeed(deviceMaxSpeed)}</b> max device` : ''}</span>
+      <span><b style="color:#8a5a5a">${crashCount}</b> crash/recovery (<b style="color:#8a5a5a">${formatHHMM(crashDur)}</b> total)</span>
+      <span><b>${derivedMaxSpeed!=null ? formatSpeed(derivedMaxSpeed) : '—'}</b> max derived${[
+        fitMaxSpeed!=null ? ` / <b>${formatSpeed(fitMaxSpeed)}</b> max fit` : '',
+        deviceMaxSpeed!=null ? ` / <b>${formatSpeed(deviceMaxSpeed)}</b> max device` : ''
+      ].join('')}</span>
       <span>${hasDeviceSpeed ? '<b style="color:var(--good)">device speed present</b>' : '<span style="color:var(--dim)">no device speed field</span>'}</span>
     `;
   }
@@ -2096,19 +2737,28 @@
     // is a data artifact.
     //
     // Same balance principle as dedupeTimestamps above, transposed: there,
-    // position varied within a run sharing one timestamp, so the balance
-    // metric was distance; here, time varies within a run sharing one
-    // position, so the balance metric is time. Rather than arbitrarily
-    // keeping the run's first (earliest) point, keep whichever ONE point
-    // minimizes the difference between the time gap immediately BEFORE it
-    // (from the nearest already-kept point) and the time gap immediately
-    // AFTER it (to the next distinct-position point) — the point that
-    // best preserves a smooth, consistent time step through this
-    // stutter, rather than risking an arbitrary pick that leaves a large
-    // time jump on one side and a tiny one on the other. Letting the
-    // resulting wider gap be handled by the normal gap-shading (and our
-    // variable-dt-tolerant kinematics) instead of producing a fake
-    // zero-velocity segment.
+    // position varied within a run sharing one timestamp, so distance was
+    // fixed and speed was balanced by choosing where to put the shared
+    // time; here, time varies within a run sharing one position, so
+    // distance is fixed instead (every candidate shares points[i]'s own
+    // position) — but the thing actually worth balancing is still SPEED,
+    // not raw time. Originally implemented as a time-balance (minimize
+    // |dtBefore - dtAfter|), which turns out to have the same flaw
+    // dedupeTimestamps did before its own fix, just with distance and
+    // time swapped: a synthetic case with distBefore=10m, distAfter=20m
+    // (points 10m apart before the stutter, 20m apart after) showed
+    // time-balancing picking the timestamp splitting the interval
+    // exactly in half, which implies a dead-flat speed DOUBLING across
+    // it (5 m/s to 10 m/s) — because equal time over unequal distances
+    // is unequal speed, not equal. Speed-balancing instead picks
+    // whichever timestamp minimizes the difference between the speed
+    // implied immediately BEFORE it and the speed implied immediately
+    // AFTER — the point that best preserves a smooth, consistent SPEED
+    // through this stutter, rather than one that merely splits the time
+    // evenly regardless of how far apart the two sides actually are.
+    // Letting the resulting wider gap be handled by the normal
+    // gap-shading (and our variable-dt-tolerant kinematics) instead of
+    // producing a fake zero-velocity segment.
     const keepIdx = [];
     let removedCount = 0;
     let i = 0;
@@ -2120,11 +2770,21 @@
       } else {
         const prevIdx = keepIdx.length > 0 ? keepIdx[keepIdx.length-1] : null;
         const nextIdx = j < points.length ? j : null;
+        // Fixed for the whole group — every candidate shares points[i]'s
+        // own position, so these don't vary by k.
+        const distBefore = prevIdx != null ? Math.hypot(points[i].x-points[prevIdx].x, points[i].y-points[prevIdx].y) : null;
+        const distAfter = nextIdx != null ? Math.hypot(points[nextIdx].x-points[i].x, points[nextIdx].y-points[i].y) : null;
         let bestK = i, bestDiff = Infinity;
         for(let k=i; k<j; k++){
-          const dtBefore = prevIdx != null ? points[k].time.getTime() - points[prevIdx].time.getTime() : 0;
-          const dtAfter = nextIdx != null ? points[nextIdx].time.getTime() - points[k].time.getTime() : 0;
-          const diff = Math.abs(dtBefore - dtAfter);
+          const dtBefore = prevIdx != null ? (points[k].time.getTime() - points[prevIdx].time.getTime())/1000 : null;
+          const dtAfter = nextIdx != null ? (points[nextIdx].time.getTime() - points[k].time.getTime())/1000 : null;
+          const speedBefore = (distBefore != null && dtBefore != null && dtBefore > 0) ? distBefore/dtBefore : null;
+          const speedAfter = (distAfter != null && dtAfter != null && dtAfter > 0) ? distAfter/dtAfter : null;
+          // If either side is missing (start/end of track) or has zero
+          // duration, there's no meaningful speed comparison to make —
+          // treat every candidate as equally good rather than
+          // arbitrarily preferring one.
+          const diff = (speedBefore != null && speedAfter != null) ? Math.abs(speedBefore - speedAfter) : 0;
           if(diff < bestDiff){ bestDiff = diff; bestK = k; }
         }
         keepIdx.push(bestK);
@@ -2223,8 +2883,16 @@
     if(timeView.tMin < fullTRange.tMin){ timeView.tMin = fullTRange.tMin; timeView.tMax = timeView.tMin + span; }
     if(timeView.tMax > fullTRange.tMax){ timeView.tMax = fullTRange.tMax; timeView.tMin = timeView.tMax - span; }
   }
-  [runCurvThreshInput, runBreakHeadingThreshInput, runNarrowHeadingThreshInput, runMinSecInput, runMinDurationInput, runLowSpeedThreshInput, runDeviceDisagreeThreshInput, runTailSampleEdgesInput, reconnectAngleInput, looseTackMaxDurationInput, looseTackMaxStallTimeInput].forEach(inp=>{
+  [runCurvThreshInput, runBreakHeadingThreshInput, runNarrowHeadingThreshInput, runMinEdgesInput, runMinSecInput, runMinDurationInput, runLowSpeedThreshInput, runAccelDeviationThreshInput, runWarmupCentripetalAccelThreshInput, reconnectEnabledInput, looseTackMaxDurationInput, looseTackMaxStallTimeInput, speedLagAccelThreshInput].forEach(inp=>{
     inp.addEventListener('input', ()=>{ redrawAll(); });
+  });
+  // Separate from the loop above: these two affect fitDerived itself
+  // (computeFitKinematics), not just how existing values get drawn, so
+  // they need to actually recompute the sweep before redrawing — the
+  // shared loop above only ever triggers a redraw against whatever
+  // fitDerived already holds.
+  [fitNumPointsInput, fitDegreeInput].forEach(inp=>{
+    inp.addEventListener('input', ()=>{ computeFitKinematics(); redrawAll(); });
   });
 
   function step(dir){
@@ -2468,13 +3136,88 @@
   // each other, neither does this). Shared between drawMap (which draws
   // per-edge colors) and updateTrackLegend (which needs the same
   // reasoning to describe what "excluded" means there).
+
+  // Flags any point whose own tangential acceleration deviates from the
+  // local path fit's own tangential acceleration at that point
+  // (fitDerived, computeFitKinematics — shared with the kinematics
+  // charts and the map's local curve) by more than a configurable
+  // threshold — replaces an earlier, more elaborate detector (a 4-edge
+  // windowed jump/dip comparison, plus a heading-consistency filter),
+  // and before that a simpler EWMA-based version, each needing
+  // progressively more special cases to catch real examples without
+  // also catching genuine turns. The path fit is a much better local
+  // trend line than either predecessor — see the earlier discussion on
+  // why an EWMA lags during genuine acceleration while a fit derived
+  // from a smooth curve through the surrounding points doesn't — so
+  // "far from what the fit predicts" is the criterion directly, one
+  // rule instead of several, no heading check needed. Compares
+  // acceleration rather than speed itself: a position glitch shows up
+  // as a sharp, transient spike in how quickly speed is changing, which
+  // acceleration is directly built to detect, rather than as an offset
+  // in the speed value itself, which the fit's own smoothing already
+  // partially absorbs.
+  function findSpeedLagArtifacts(){
+    const thresh = parseFloat(speedLagAccelThreshInput.value);
+    if(!Number.isFinite(thresh)) return [];
+    const flagged = [];
+    for(let i=firstValid; i<=lastValid; i++){
+      const d = derived[i];
+      if(!d || d.tanAccel == null) continue;
+      const fit = fitDerived[i];
+      if(!fit || fit.tanAccel == null) continue;
+      if(Math.abs(d.tanAccel - fit.tanAccel) > thresh){
+        flagged.push(i);
+      }
+    }
+    return flagged;
+  }
+
+  // Deletes every currently-flagged point and recomputes — same pattern
+  // as removeDuplicateCoordPoints: validate the result BEFORE committing
+  // to the points array, so a would-be-too-small result never leaves
+  // points in a partially-mutated state.
+  function deleteSpeedLagArtifacts(){
+    if(!points.length) return;
+    const flagged = findSpeedLagArtifacts();
+    if(flagged.length === 0){ alert('No matching points found.'); return; }
+
+    const flagSet = new Set(flagged);
+    const filtered = points.filter((p,i) => !flagSet.has(i));
+    if(filtered.length < 3){ alert('That would leave fewer than 3 points — aborting.'); return; }
+
+    const beforeCount = points.length;
+    const selT = points[selected] ? points[selected].t : null;
+    points = filtered;
+
+    computeDerived();
+    fullTRange = { tMin: points[firstValid].t, tMax: points[lastValid].t };
+    clampTimeView();
+
+    let best = 0, bestD = Infinity;
+    if(selT != null){
+      for(let k=0;k<points.length;k++){
+        const dd = Math.abs(points[k].t - selT);
+        if(dd < bestD){ bestD = dd; best = k; }
+      }
+    }
+    selected = best;
+
+    buildUI();
+    redrawAll();
+    alert(`Removed ${flagged.length} flagged point(s): ${beforeCount} \u2192 ${points.length} points. Use "restore original track" to compare against the unfiltered kinematics.`);
+  }
+
+  // Only a true gap excludes an edge now — device-speed disagreement used
+  // to also exclude here, but now that a second, independent speed
+  // estimate exists for every edge (the local path fit — §7), that's a
+  // better reference than an external device reading that isn't always
+  // present anyway: see the min/max range computation below, which uses
+  // the fit's own speed rather than a device-disagreement exclusion to
+  // keep a single glitched edge from skewing the color scale.
   function edgeGradientExcluded(i){
     const d = derived[i];
     if(!d) return true;
     if(edgeGapFails(i)) return true;
-    const p = points[i];
-    const deviceDisagreeT = parseFloat(runDeviceDisagreeThreshInput.value);
-    if(p.rawSpeed != null && !Number.isNaN(p.rawSpeed) && (d.speed - p.rawSpeed) >= deviceDisagreeT) return true;
     return false;
   }
   function speedToColor(speed, minSpeed, maxSpeed){
@@ -2523,17 +3266,32 @@
     // classification at all, which stay the plain grey base path
     // regardless of mode: a true dt gap (edgeGapFails — GPS dropout, the
     // derived speed there is a gap-spanning average, not a real
-    // instantaneous reading), a derived/device speed disagreement (the same
-    // check computeRuns uses to break runs — if the two don't trust each
-    // other, neither does this), a crash/recovery zone specifically (real
+    // instantaneous reading), a crash/recovery zone specifically (real
     // motion, but not ordinary sailing speed), or an edge outside any run
     // or transition at all (never classified one way or the other).
+    //
+    // The color scale's own min/max range is computed from the local path
+    // fit's speed (§7) at each eligible point, not the raw edge speed —
+    // deliberately: the fit is a second, independent speed estimate that
+    // naturally smooths out an isolated glitched edge, so a single bad
+    // point can't drag the whole color scale's bounds along with it, the
+    // same protection device-speed disagreement used to provide before
+    // the fit existed, without needing an external device reading that
+    // isn't always present anyway. Individual edges are still colored by
+    // their own actual (raw) derived speed, mapped into this range — only
+    // the range's bounds come from the fit, not the per-edge color value
+    // itself, so the displayed gradient still reflects real edge-to-edge
+    // variation rather than a smoothed-over version of it. Points where
+    // the fit isn't available (near the track's very start/end) are
+    // simply skipped for range purposes, not fallen back to raw — mixing
+    // the two would reintroduce the exact outlier sensitivity this is
+    // meant to avoid.
     let speedMin = 0, speedMax = 1;
     if(edgeColorMode === 'speed'){
       const eligibleSpeeds = [];
       currentRuns.forEach(run=>{
         for(let i=run.startIdx+1;i<=run.endIdx;i++){
-          if(!edgeGradientExcluded(i)) eligibleSpeeds.push(derived[i].speed);
+          if(!edgeGradientExcluded(i) && fitDerived[i]) eligibleSpeeds.push(fitDerived[i].speed);
         }
       });
       currentTransitions.forEach(tr=>{
@@ -2541,7 +3299,7 @@
         const isFullLength = tr.type === 'jibe' || tr.type === 'tack';
         const endIdx = isFullLength ? tr.transitionEnd : tr.attemptEndIdx;
         for(let i=tr.transitionStart+1;i<=endIdx;i++){
-          if(!edgeGradientExcluded(i)) eligibleSpeeds.push(derived[i].speed);
+          if(!edgeGradientExcluded(i) && fitDerived[i]) eligibleSpeeds.push(fitDerived[i].speed);
         }
       });
       if(eligibleSpeeds.length > 0){
@@ -2648,6 +3406,40 @@
       });
     });
 
+    // speed-lag artifacts: a bright red X at each flagged point (see
+    // findSpeedLagArtifacts) — deliberately a different shape (a cross,
+    // not a dot or circle) and a more alarming color than anything else
+    // on the map, so a suspected GPS-lag artifact reads as a warning at
+    // a glance rather than blending in with the run/maneuver markers.
+    findSpeedLagArtifacts().forEach(idx=>{
+      const X = sx(points[idx].x), Y = sy(points[idx].y);
+      ctx.strokeStyle = '#ff3b3b';
+      ctx.lineWidth = 2;
+      const r = 6;
+      ctx.beginPath();
+      ctx.moveTo(X-r, Y-r); ctx.lineTo(X+r, Y+r);
+      ctx.moveTo(X+r, Y-r); ctx.lineTo(X-r, Y+r);
+      ctx.stroke();
+    });
+
+    // local cubic path fit, centered on the selection — a smooth
+    // reference curve through the 5 points around it (see
+    // computeLocalCubicFit), drawn dashed to stay visually distinct from
+    // the solid track path underneath
+    const localFit = computeLocalCubicFit();
+    if(localFit){
+      ctx.strokeStyle = '#ffa94d';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4,3]);
+      ctx.beginPath();
+      localFit.forEach((p,k)=>{
+        const X = sx(p.x), Y = sy(p.y);
+        if(k===0) ctx.moveTo(X,Y); else ctx.lineTo(X,Y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     // selected point
     const sp = points[selected];
     ctx.strokeStyle = '#fff';
@@ -2673,6 +3465,7 @@
   // keeping its content current regardless means it's never stale the
   // moment someone does open it.
   function updateTrackLegend(){
+    const fitLegendLabel = `local path fit (${fitNumPointsInput.value}-pt, degree ${fitDegreeInput.value})`;
     if(edgeColorMode === 'type'){
       trackLegend.innerHTML = `
         <span><span class="sw" style="background:#3a4552"></span>track path</span>
@@ -2683,6 +3476,8 @@
         <span><span class="sw" style="background:#2dd4bf"></span>classified tack</span>
         <span><span class="sw" style="background:#ff5d9e"></span>failed tack attempt</span>
         <span><span class="sw" style="background:#8a5a5a"></span>crash / recovery (gap-triggered)</span>
+        <span><span class="sw" style="background:#ff3b3b"></span>suspected GPS-lag point</span>
+        <span><span class="sw" style="border-top:2px dashed #ffa94d; background:transparent; height:1px;"></span>${fitLegendLabel}</span>
       `;
     } else {
       const {min, max} = currentSpeedGradientRange;
@@ -2698,6 +3493,8 @@
           <span>${formatSpeed(max)}</span>
         </span>
         <span><span class="sw" style="background:#e0c34f; border-radius:50%;"></span>run breakpoint (start/end — can be shared between runs)</span>
+        <span><span class="sw" style="background:#ff3b3b"></span>suspected GPS-lag point</span>
+        <span><span class="sw" style="border-top:2px dashed #ffa94d; background:transparent; height:1px;"></span>${fitLegendLabel}</span>
       `;
     }
   }
@@ -3148,13 +3945,19 @@
     const pad = {l:38, r:10, t:8, b:18};
 
     // Only the 'speed' metric gets unit-converted for display — this
-    // function is shared across all 5 kinematic plots, and acceleration/
-    // heading/curvature aren't affected by the speed unit setting.
-    // rawSpeed (the device-reported overlay) is always a speed regardless
-    // of which key is being plotted, so it always converts when present.
+    // function is shared across all 6 kinematic plots, and acceleration/
+    // heading/curvature/length-deviation aren't affected by the speed
+    // unit setting. rawSpeed (the device-reported overlay) is always a
+    // speed regardless of which key is being plotted, so it always
+    // converts when present.
     const isSpeedKey = key === 'speed';
     function getVal(i){
-      const v = derived[i][key];
+      // fitOnly metrics (currently just lengthDeviation) have no
+      // edge-based counterpart at all — they're a comparison between the
+      // fit and the edges, so they only ever exist on fitDerived.
+      const source = opts.fitOnly ? fitDerived[i] : derived[i];
+      if(!source) return null;
+      const v = source[key];
       if(v == null) return null;
       return isSpeedKey ? dispSpeed(v) : v;
     }
@@ -3163,6 +3966,16 @@
       if(rs == null || Number.isNaN(rs)) return null;
       return dispSpeed(rs);
     }
+    // Local path fit's own kinematics at each point (see
+    // computeFitKinematics) — available for all 5 plots, since the fit
+    // gives a full velocity+acceleration vector at the evaluation point,
+    // not just speed. Same unit-conversion convention as getVal above.
+    function getFitVal(i){
+      if(!fitDerived[i]) return null;
+      const v = fitDerived[i][key];
+      if(v == null) return null;
+      return isSpeedKey ? dispSpeed(v) : v;
+    }
 
     const tMin = timeView.tMin, tMax = timeView.tMax;
     const vals = [];
@@ -3170,12 +3983,14 @@
       if(points[i].t < tMin || points[i].t > tMax) continue;
       const v = getVal(i); if(v != null) vals.push(v);
       if(opts.overlayDeviceSpeed){ const rs = getRawSpeedVal(i); if(rs != null) vals.push(rs); }
+      const fv = getFitVal(i); if(fv != null) vals.push(fv);
     }
     if(vals.length < 2){
       vals.length = 0;
       for(let i=firstValid;i<=lastValid;i++){
         const v = getVal(i); if(v != null) vals.push(v);
         if(opts.overlayDeviceSpeed){ const rs = getRawSpeedVal(i); if(rs != null) vals.push(rs); }
+        const fv = getFitVal(i); if(fv != null) vals.push(fv);
       }
     }
     if(vals.length === 0) vals.push(0,1); // nothing plottable in view — fall back to a harmless default range
@@ -3301,6 +4116,42 @@
       ctx.stroke();
     }
 
+    // local path fit's own kinematics (see computeFitKinematics), swept
+    // across the whole track — available on the 5 shared plots, since the
+    // fit gives velocity and acceleration together at each point, not
+    // just speed. Skipped for fitOnly plots (currently lengthDeviation):
+    // getVal already reads directly from fitDerived for those, so this
+    // would just draw the identical line a second time on top of itself.
+    if(!opts.fitOnly){
+      ctx.strokeStyle = '#b98eff';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      let fitStarted=false;
+      for(let i=firstValid;i<=lastValid;i++){
+        const fv = getFitVal(i);
+        if(fv == null){ fitStarted=false; continue; }
+        const X = sx(points[i].t), Y = sy(fv);
+        if(!fitStarted){ ctx.moveTo(X,Y); fitStarted=true; } else ctx.lineTo(X,Y);
+      }
+      ctx.stroke();
+    }
+
+    // speed-lag artifact markers — same red X as the map, at whichever
+    // metric is currently plotted, so they're visible regardless of which
+    // of the 5 charts is showing
+    findSpeedLagArtifacts().forEach(idx=>{
+      const v = getVal(idx);
+      if(v == null || points[idx].t < tMin || points[idx].t > tMax) return;
+      const X = sx(points[idx].t), Y = sy(v);
+      ctx.strokeStyle = '#ff3b3b';
+      ctx.lineWidth = 2;
+      const r = 5;
+      ctx.beginPath();
+      ctx.moveTo(X-r,Y-r); ctx.lineTo(X+r,Y+r);
+      ctx.moveTo(X+r,Y-r); ctx.lineTo(X-r,Y+r);
+      ctx.stroke();
+    });
+
     ctx.restore();
 
     // selected marker
@@ -3308,17 +4159,34 @@
     ctx.strokeStyle = '#fff';
     ctx.beginPath(); ctx.moveTo(X, pad.t); ctx.lineTo(X, h-pad.b); ctx.stroke();
 
-    // selected point's value, at the base of its marker line — same size
-    // as the gridline labels, white to match the marker itself, no unit
-    // (shown once near the dropdown instead of repeated everywhere)
-    const selVal = getVal(selected);
-    if(selVal != null){
-      ctx.fillStyle = '#fff';
-      ctx.font = '10px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(selVal.toFixed(1), X, h-2);
-      ctx.textAlign = 'left';
+    // selected point's values, stacked as one row per available source
+    // (edge, device, fit) at the base of its marker line — same size as
+    // the gridline labels, each colored to match its own line so a row
+    // is identifiable without a separate key, no unit shown (already
+    // named once near the dropdown instead of repeated on every row).
+    // Order and colors match updateKinematicLegend's own ordering:
+    // main/edge first, then device (if this plot overlays it), then fit
+    // (unless fitOnly, where the main row already IS the fit value and a
+    // second fit row would just repeat it).
+    const selRows = [];
+    const selEdgeVal = getVal(selected);
+    if(selEdgeVal != null) selRows.push({v: selEdgeVal, color: '#4fb3ff'});
+    if(opts.overlayDeviceSpeed){
+      const selDeviceVal = getRawSpeedVal(selected);
+      if(selDeviceVal != null) selRows.push({v: selDeviceVal, color: '#3ecf8e'});
     }
+    if(!opts.fitOnly){
+      const selFitVal = getFitVal(selected);
+      if(selFitVal != null) selRows.push({v: selFitVal, color: '#b98eff'});
+    }
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    const rowHeight = 11;
+    for(let r=0; r<selRows.length; r++){
+      ctx.fillStyle = selRows[r].color;
+      ctx.fillText(selRows[r].v.toFixed(1), X, h-2-r*rowHeight);
+    }
+    ctx.textAlign = 'left';
 
     canvas._scaleX = sx; canvas._domain = [tMin,tMax]; canvas._pad = pad; canvas._w = w;
   }
@@ -3462,6 +4330,9 @@
     centripetalAccel: { key: 'centripetalAccel', opts: {symmetric:true}, name: 'centripetal acceleration', unit: () => 'm/s\u00b2' },
     headingUnwrapped: { key: 'headingUnwrapped', opts: {}, name: 'heading', unit: () => 'deg' },
     curvature: { key: 'curvature', opts: {symmetric:true}, name: 'curvature', unit: () => '/m' },
+    lengthDeviation: { key: 'lengthDeviation', opts: {symmetric:true, fitOnly:true}, name: 'path length deviation', unit: () => 'm' },
+    tangentialJerk: { key: 'tangentialJerk', opts: {symmetric:true}, name: 'tangential jerk', unit: () => 'm/s\u00b3' },
+    centripetalJerk: { key: 'centripetalJerk', opts: {symmetric:true}, name: 'centripetal jerk', unit: () => 'm/s\u00b3' },
   };
   const kinematicLegendToggleBtn = el('kinematicLegendToggleBtn');
   const kinematicLegendContainer = el('kinematicLegendContainer');
@@ -3491,6 +4362,10 @@
     if(plot.opts.overlayDeviceSpeed){
       html += `<span><span class="sw" style="background:#3ecf8e"></span>device speed</span>`;
     }
+    if(!plot.opts.fitOnly){
+      html += `<span><span class="sw" style="background:#b98eff"></span>local path fit (${fitNumPointsInput.value}-pt, degree ${fitDegreeInput.value})</span>`;
+    }
+    html += `<span><span class="sw" style="background:#ff3b3b"></span>suspected GPS-lag point</span>`;
     kinematicLegend.innerHTML = html;
   }
 
