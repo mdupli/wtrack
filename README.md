@@ -208,126 +208,332 @@ the segment from point `i-1` to point `i`; its velocity/heading is
 `derived[i]`. `curvature(i)` describes the *transition* at point `i`,
 between the edge ending there and the edge starting there.
 
+**Mixed edge-based and fit-based now, deliberately, not uniformly one or
+the other.** Heading reads `derived`'s own edge-based value throughout.
+Speed and curvature read `fitDerived`'s smoothed value (§7). This wasn't
+the original design — everything read `derived` at first — and the split
+itself is the result of two rounds of trying "just use the fit
+everywhere" and walking part of it back after real failures on real
+tracks:
+
+- Switching curvature and speed to the fit held up and stayed.
+- Switching heading to the fit did not, and was reverted. The fit's own
+  path can genuinely loop or overshoot near a true `dt` gap (§7 —
+  originally accepted there as a harmless cosmetic quirk of the map
+  display, since nothing consumed the fit's heading for a real decision
+  at the time). Once run detection actually started reading fit-based
+  heading for its own decisions, that same loop meant a genuinely wrong
+  *direction* reading right where a run boundary was being decided — the
+  one place accuracy matters most. Curvature doesn't carry the same risk
+  in practice: it's a magnitude, not a direction, so a gap-induced loop
+  inflates it rather than silently pointing it the wrong way — and an
+  inflated curvature at a gap tends to correctly trigger a break there
+  anyway, which is what should happen at a gap regardless.
+- A separate scare, initially blamed on the same cause, turned out to be
+  a false alarm: an early attempt to also guard the *fit's own*
+  heading/curvature computation against low-speed noise (nulling them
+  out below a speed threshold, rather than letting through the small
+  noisy values a near-stationary fit produces) broke run detection
+  outright — confirmed directly on a real track, 133 runs before the
+  guard, 0 after. The reasoning for why the guard was unnecessary in the
+  first place: `headingUnwrapped` is only ever consumed as a *local
+  difference* within an already-validated window (never as an absolute
+  value needing a clean global baseline), and low-speed points are
+  already excluded from ever being part of such a window by the ordinary
+  low-speed edge check below — so the noise was never actually reaching
+  a decision unfiltered. The guard didn't fix a real problem; it was net
+  new complexity.
+
+### The shape of the criteria: two axes, plus one scope-limited addition
+
+Before the state machine itself, it's worth seeing the checks as a small
+grid rather than a flat list — every failure mode besides one falls into
+exactly one of four cells, split along two independent axes:
+
+|  | **local** (fixed threshold) | **contextual** (compares against run state) |
+|---|---|---|
+| **edge-level** (pass-1 kinematics) | speed, gap | heading (narrow / wide) |
+| **vertex-level** (pass-2 kinematics) | curvature, fit-vs-edge tangential-accel deviation | *(empty)* |
+
+The edge/vertex split tracks exactly which kinematics pass each check
+reads from (§3): edge-level checks use the backward-difference velocity
+attributed to an edge; vertex-level checks use the centered-difference
+acceleration/curvature attributed to a vertex. The local/contextual split
+is about what a check compares against — a fixed constant (a threshold in
+the controls panel), or something the run's own accumulated state
+produced (how far heading has swung across *this* window so far). Heading is
+the one check that's edge-level but contextual, which is why it alone
+needed two separate thresholds (narrow/wide — see below) where nothing
+else in the pipeline does. The vertex-level/contextual cell is empty:
+curvature and the fit-deviation check are both inherently about whether a
+single point's own reading is extreme, which doesn't have an obvious
+run-relative analogue the way "has heading drifted from where this run
+started" does — not an obvious gap to fill, just a structural asymmetry
+worth noticing.
+
+A fifth check, **fit centripetal acceleration**, doesn't fit cleanly into
+this grid at all — it's vertex-level and local like curvature, but scoped
+differently: checked only during warm-up and trailing straightness, never
+during extension. See "The warm-up/warm-down-only check" below for why.
+
 Two angle thresholds do different jobs:
 - **narrow angle** (`runNarrowHeadingThresh`, default `10°`) — validates a
   candidate warm-up window as a genuinely stable direction, and separately
   validates a run's own trailing edge (see step 6).
-- **wide angle** (`runBreakHeadingThresh`, default `90°`) — once a run's
-  reference direction is fixed, how far heading can wander from it before
-  that's a real point-of-sail change, not just wiggle. Set intentionally
-  generous — see the walk-back mechanism in step 5, which is what makes a
-  large tolerance here safe rather than just permissive.
+- **wide angle** (`runBreakHeadingThresh`, default `120°`) — how far
+  heading can swing, in total, anywhere across the run so far (tracked as
+  a running `max − min` range, not distance from one fixed reference —
+  see step 5) before that's a real point-of-sail change, not just
+  wiggle. Set intentionally generous — see the walk-back mechanism in
+  step 5, which is what makes a large tolerance here safe rather than
+  just permissive.
 
 ### State machine
 
 1. **Break point.** Start at the track's first point, or the end of a
    previously found run.
 
-2. **Warm-up.** From the break point, accumulate edges until `runMinSec`
-   (default `5s`) of duration is covered.
+2. **Warm-up.** From the break point, accumulate edges until *both*
+   `runMinSec` (default `2s`) *and* `runMinEdges` (default `2`) are
+   covered, not duration alone — a stretch of slower variable-rate
+   sampling could satisfy the duration bar with too few actual points to
+   trust a heading range computed from them.
 
-3. **Warm-up validation — heading & edge checks.** Every edge in the
-   window (**not** including the edge feeding *into* the break point
-   itself — that belongs to whatever came before) must:
-   - agree with the window's own narrow-angle average heading, and
-   - pass the *edge* check (see below: low speed, device disagreement, or
-     a true gap).
-
-   Any failure aborts the whole window — the break point slides forward by
+3. **Warm-up validation — heading and edge check.** Every edge in the
+   window, including the one feeding *into* the break point itself, must
+   pass the *edge* check (see below: low speed, or a true gap). Any
+   failure aborts the whole window — the break point slides forward by
    **one point**, and warm-up is retried from scratch.
 
-4. **Warm-up validation — curvature.** Checked at every vertex in the
-   window **except its own start**: the start is already a break point, so
-   high or undefined curvature there is expected — that's what makes it a
-   break in the first place. An **inner** vertex failing curvature aborts
-   warm-up (same as step 3). But a failure exactly at the window's own
-   **end** is *not* a failure — it means this is a minimal candidate run,
-   terminating right there; skip extension (step 5) entirely.
+   Heading is bounded by tracking the window's own `headingUnwrapped`
+   range (`max − min`) directly, incrementally as each point is scanned,
+   and failing as soon as that range reaches the narrow angle — rather
+   than computing an average heading for the window and checking each
+   point's distance from it. An average is one number summarizing the
+   window; it can't itself detect the window failing to be internally
+   consistent the way a direct range bound can — a window whose points
+   drift steadily in one direction (say -5°, 0°, +5°, +10°) has an
+   average close to the middle of that drift, so points near either end
+   can each individually sit comfortably within the narrow angle of the
+   average while the window's own total spread already exceeds it.
+   Tracking the range directly instead catches exactly that case, and
+   removes the need to compute anything before scanning starts — the
+   check can run in a single incremental pass.
 
-5. **Extension, with walk-back.** One point at a time, against the
-   now-**fixed** warm-up reference direction:
-   - the new edge must agree within the **wide** angle, and pass the edge
-     check;
-   - if the edge passes, its endpoint **joins** the run, and *then* gets
-     its own curvature checked: passing means keep extending (tracking
-     the point of highest `|curvature|` seen so far along the way);
-     failing means the point **stays included**, but extension stops
-     there.
-   - if the wide-angle check specifically fails: instead of ending the run
-     at the point right before the failure, **walk back** to wherever
-     curvature peaked during this extension (if anywhere) and end the run
-     there instead. A gradual, real course change can take a long time to
-     accumulate past the wide-angle threshold — by the time it does, the
-     actual turning may have already happened and finished well earlier,
-     with the boat sailing close to straight again by the time the
-     cumulative deviation alone finally trips the threshold. Walking back
-     recovers the true turn location regardless of how long that took.
-     Ties in the peak search favor the **latest** candidate — critical for
-     a uniform, constant-rate drift with no distinguishable peak at all:
-     without that tie-break, walking back would collapse the run to almost
-     nothing at the very first point of the drift, defeating the entire
-     purpose of a generous wide-angle tolerance. With it, undifferentiated
-     drift is left exactly where it would have stopped anyway, and only a
-     genuine, distinguishable spike gets preferentially selected. If the
-     wide-angle check fails on the very first candidate point (nothing
-     ever joined the run during extension, no walk-back candidate exists),
-     the run simply ends at the warm-up window's own end, same as before.
-     Either way, once walk-back happens the termination is attributed to
-     `'curvature'`, not `'heading'`, for the purposes of step 8's resume
-     logic — it now represents a located, real turning point rather than
-     bare cumulative drift.
-   - if the edge fails on speed/device-disagreement/gap instead, the new
-     point is simply **excluded** — no walk-back, the run ends cleanly at
-     the edge's start point (this failure mode already pinpoints a
-     specific problem edge, nothing to relocate).
+   Uses `headingUnwrapped` throughout (both for the range being tracked
+   and each point being compared) rather than raw heading compared via
+   wraparound-aware `headingDiff` — not just for consistency: a wrapped
+   comparison can't distinguish a genuine multi-hundred-degree rotation
+   from a small one once it crosses 180°, since `headingDiff` always
+   returns the *shortest* angular distance. Confirmed directly: a
+   synthetic case stepping cumulative rotation from 90° up to 350° showed
+   a wrapped comparison correctly blocking every step through 270°, then
+   incorrectly *allowing* 350° (wrapped distance only 10°) despite it
+   being the largest rotation in the whole sequence — meaning a run could
+   have silently extended through most of a full-circle spin without ever
+   tripping the check.
+
+   A straight-line corridor check — fitting a line through the window's
+   own points and failing if any point strayed too far perpendicular to
+   it — also lived here for a while, meant to catch a path shape the
+   heading check alone can miss: a small, consistent zigzag where every
+   individual edge stays within the narrow angle, but the path itself
+   visibly wanders. Removed once fit centripetal acceleration (step 4)
+   existed alongside it: for a warm-up-sized window at ordinary sailing
+   speed, bounding centripetal acceleration at every vertex already
+   implies a bound on how far the path can stray from straight —
+   confirmed directly, a synthetic zigzag with each individual bend held
+   just under the centripetal threshold produced a corridor deviation of
+   only ~0.5m, well under the corridor check's own former default (2m).
+   The two checks were catching largely the same thing by the end, and
+   the corridor check's own threshold was the harder one to tune well —
+   set too tight, it started excluding genuinely reasonable warm-up/
+   warm-down windows and visibly widening transition zones, while the
+   visible difference between a loose and a tight setting was otherwise
+   small.
+
+4. **Warm-up validation — vertex checks (curvature, accel-fit deviation,
+   fit centripetal acceleration).** Checked at *every* vertex in the
+   window — including its own start (the break point) and its own end.
+   No exemptions, no special cases: any failure anywhere is a hard
+   failure of the whole window.
+
+   This is a deliberate simplification from an earlier version, where the
+   break point's own vertex was exempt ("it's already a break point, so
+   high or undefined curvature there is expected — that's what makes it a
+   break in the first place"), and a failure exactly at the window's own
+   end was treated as a valid, minimal run rather than a failure. Both
+   removed: if the break point's own vertex is still carrying real
+   curvature, tangential-accel deviation, or centripetal acceleration,
+   warm-up is starting from a point that hasn't genuinely settled either
+   — the same reasoning that already drives pulling warm-down's own
+   boundary back past its own tail-end curvature peak (step 6), just
+   applied symmetrically to the other end. With the minimal-run
+   possibility gone, warm-up always either fully passes or fully fails —
+   there's no longer a path that skips extension outright.
+
+5. **Extension, with walk-back.** One point at a time:
+   - the new point's own `headingUnwrapped` is checked against the run's
+     own range **so far** (seeded from the warm-up window's own range,
+     then extended incrementally as each new point joins) — the new
+     point must not push that range's `max − min` to or past the **wide**
+     angle — and pass the edge check. This is a genuinely stricter
+     standard than comparing each new point against one fixed average
+     the way step 3 used to: an average is one number summarizing the
+     window, so a candidate could sit within the wide angle of that
+     average while the window's own internal spread, plus that
+     candidate's own distance, together already exceed it. Confirmed
+     directly: a warm-up window with heading -5°/0°/+5° (average 0°, its
+     own range already 10°) and a candidate at 85° passes an average-only
+     comparison (`|85−0|=85 < 90`) but fails a direct range comparison
+     over the whole span (`90 ≥ 90`) — the same range-based principle the
+     reconnection pass (below) already used before extension's own check
+     was unified onto it.
+   - if the point passes, its endpoint **joins** the run (the tracked
+     range updates to include it), and *then* gets its own vertex checks
+     run: curvature first, then the accel-fit deviation — fit centripetal
+     acceleration is *not* checked here (see "The warm-up/warm-down-only
+     check" below). Passing both means keep extending (tracking the point
+     of highest `|`fit centripetal acceleration`|` seen so far along the
+     way — see below for why acceleration rather than curvature);
+     either one failing means the point **stays included**, but extension
+     stops there — a vertex check describes the *transition* at that
+     point, between the edge ending there and the edge starting there, so
+     a bad reading implicates the edge that would come *next*, not the
+     one that just landed the point in the run.
+   - if the wide-angle (range) check specifically fails: instead of
+     ending the run at the point right before the failure, **walk back**
+     to wherever fit centripetal acceleration peaked during this
+     extension (if anywhere) and end the run there instead — not
+     curvature, a deliberate, if subtle, choice: centripetal acceleration
+     (curvature × speed²) is the more physically representative signal
+     for "was this an intentional turn." The same geometric bend taken at
+     low speed barely registers as a felt turn at all, while the same
+     bend at speed is a real, forceful direction change — curvature alone
+     can't distinguish those two. A gradual, real course change can take
+     a long time to accumulate past the wide-angle threshold — by the
+     time it does, the actual turning may have already happened and
+     finished well earlier, with the boat sailing close to straight again
+     by the time the cumulative deviation alone finally trips the
+     threshold. Walking back recovers the true turn location regardless
+     of how long that took. Ties in the peak search favor the **latest**
+     candidate — critical for a uniform, constant-rate drift with no
+     distinguishable peak at all: without that tie-break, walking back
+     would collapse the run to almost nothing at the very first point of
+     the drift, defeating the entire purpose of a generous wide-angle
+     tolerance. With it, undifferentiated drift is left exactly where it
+     would have stopped anyway, and only a genuine, distinguishable spike
+     gets preferentially selected. If the wide-angle check fails on the
+     very first candidate point (nothing ever joined the run during
+     extension, no walk-back candidate exists), the run simply ends at
+     the warm-up window's own end, same as before. Either way, once
+     walk-back happens the termination is attributed to `'curvature'`,
+     not `'heading'`, for the purposes of step 7's resume logic — it now
+     represents a located, real turning point rather than bare cumulative
+     drift (the label stays `'curvature'` even though the peak search now
+     uses acceleration — purely internal, never shown to the user, and
+     the semantic meaning, "a locatable turning peak was found," stays
+     accurate regardless of which metric located it).
+   - if the edge fails on speed/gap instead, the new point is simply
+     **excluded** — no walk-back, the run ends cleanly at the edge's start
+     point (this failure mode already pinpoints a specific problem edge,
+     nothing to relocate).
+
+   Walk-back is the *first* of two separate mechanisms that can pull a
+   run's end backward — see step 6 for the second, which does a
+   genuinely different job despite the superficial resemblance.
 
 6. **Trailing straightness.** Before accepting the result, the run's own
-   *tail* — its last `runTailSampleEdges` (default `5`) edges — must
-   itself be narrow-angle self-consistent (checked against its own local
-   mean, not the run's original reference). Even after step 5's walk-back,
-   the tail can still drift slightly within the narrow band without
-   tripping anything upstream — this catches that and shrinks the run back
-   until the tail is clean again (down to, never below, the warm-up
-   window's own end).
+   *tail* — built exactly like warm-up's own accumulation (`runMinEdges`/
+   `runMinSec`), just backward from `runEnd` instead of forward from a
+   break point — must itself be narrow-angle self-consistent: its own
+   `headingUnwrapped` range (`max − min`, tracked the same way step 3
+   tracks warm-up's own range — not an average, see that step's own
+   reasoning) must stay under the narrow angle, and it must pass the
+   fit-centripetal-acceleration check at every vertex.
 
-7. **Boundary shrinking (reporting only).** The run's *reported*
-   `startIdx`/`endIdx` are pulled back by one edge on each side from what
-   was actually validated (`breakPoint+1` and `runEnd-1`, falling back to
-   the full unshrunk extent if that would invert the range). Two
-   independent reasons: the break point itself is completely **exempt**
-   from every check (that exemption is exactly what allows it to *be* a
-   break point) — its own edge may not represent settled sailing at all.
-   And a run's last edge, if reached via extension, was only held to the
-   *wide* angle, not the narrow one. This is purely a reporting-layer
-   decision — the internal search (including where the *next* run's break
-   point starts, step 8) still uses the full, unshrunk extent, so nothing
-   about the underlying validation changes. The practical payoff: the
-   transition zone between two runs now naturally includes both of these
-   edges automatically, which is exactly what §6's jibe/tack classifier
-   needs as lead-in/lead-out, without any separate lookup into the
-   adjacent run's own boundary. It also means two runs that internally
-   shared a breakpoint (validation found them touching with zero gap) now
-   get reported with a small one-point gap between them, rather than
-   appearing to touch.
+   Checking the tail's own range, computed fresh from just the tail
+   rather than reusing anything from the run's own extension history,
+   asks a different question than the wide-angle check in step 5 already
+   answered — "is the tail internally consistent with *itself*,"
+   regardless of how far it's drifted from where the run started. That's
+   exactly the failure mode the wide-angle tolerance can miss on its own:
+   a run whose last few points are already gradually sliding into what
+   will become the next turn, without that drift ever being large enough
+   (yet) to trip the wide check. If the tail isn't self-consistent,
+   shrink the run back by one point and retry — down to, never below, the
+   warm-up window's own end, which was already separately validated.
 
-8. **Minimum duration.** The finished run (full, unshrunk extent) is
-   checked against `runMinDuration` (default `12s`).
-   - **Kept:** push the shrunk report (step 7), and resume the next
-     search at the run's own **unshrunk** end — runs can legitimately
-     **share a boundary point** internally (the point itself didn't fail
-     anything; only the edge *leaving* it did), even though step 7 means
-     that shared point won't appear in either run's own *reported* range.
-   - **Abandoned** (too short): where to resume depends on *why* it ended.
-     A **heading**-caused ending means the window's reference direction may
-     have been a poor fit — retry from just **one point later**, giving a
-     nearby start a chance at a better, longer-lived interpretation. A
-     **velocity/curvature/gap**-caused ending is a genuine physical event —
-     retrying nearby would hit the same wall, so skip straight to the run's
-     own end instead. (A walked-back wide-angle ending counts as
-     `'curvature'` here, per step 5.)
+   Curvature and accel-fit deviation don't get re-checked here — every
+   point in the tail already passed them once, at the moment it was
+   originally added during extension (step 5), and this step only ever
+   *removes* points from the end, never adds new ones. Fit centripetal
+   acceleration *is* newly checked here, though, since it was never
+   checked during extension in the first place (see below).
 
-9. Track end can be reached either mid-run or between runs — no special
+7. **Minimum duration.** The finished run (its full, exact extent — there
+   is no separate reporting-layer boundary adjustment; an earlier version
+   pulled the reported `startIdx`/`endIdx` back by one edge on each side,
+   reasoning that the break point was exempt from validation and a
+   wide-angle-only final edge might not represent settled sailing —
+   removed once the break point stopped being exempt (step 4) and the
+   reported extent could just *be* the validated one) is checked against
+   `runMinDuration` (default `15s`).
+   - **Kept:** push the run, and resume the next search at its own end —
+     runs can legitimately **share a boundary point**: the point itself
+     didn't fail anything, only the edge *leaving* it did.
+   - **Abandoned** (too short): where to resume depends on *why* it ended,
+     and the split tracks the same local/contextual distinction from
+     above. A **heading**-caused ending is *contextual* — tied
+     specifically to the range this particular break point's own warm-up
+     window produced — so retrying just **one point later** gives a
+     genuinely different starting range a chance. Every other reason
+     (**velocity, gap, curvature, accel-fit deviation**) is *local* — a
+     real gap, a real slow stretch,
+     a real sharp turn, a real bad point — nothing about shifting the
+     start by one changes whether that specific edge or vertex still
+     fails, so resuming straight at the run's own end is both correct and
+     cheaper. (A walked-back wide-angle ending counts as `'curvature'`
+     here, per step 5.) Warm-up failures (steps 3–4) don't get this
+     choice at all — they always retry at `breakPoint + 1` regardless of
+     which check failed, since warm-up never produces a `runEnd` worth
+     skipping to in the first place.
+
+8. Track end can be reached either mid-run or between runs — no special
    handling needed; the loop just stops.
+
+### The warm-up/warm-down-only check
+
+**Fit centripetal acceleration** (`runWarmupCentripetalAccelThresh`,
+default `1.2 m/s²`) is checked only during warm-up (step 4) and trailing
+straightness (step 6) — never during extension (step 5), unlike every
+other vertex check.
+
+Centripetal acceleration alone was tried much earlier in this project as
+a *general* transition-detection signal and abandoned — it flagged
+ordinary tactical heading changes too, since a deliberate, gentle course
+adjustment mid-run has real centripetal acceleration too, just not enough
+to be a maneuver. Scoping it to warm-up/warm-down only sidesteps that
+failure mode entirely: extension still tolerates it freely (a run can
+have a mild tactical wiggle in its own interior without breaking), and
+this only ever governs where a run's *start* and *end* get positioned
+once something else has already decided a break belongs there.
+
+That distinction matters for exactly the case this is meant to catch: a
+walk-back-terminated run's own last vertex is, by construction, wherever
+fit centripetal acceleration peaked — so it's often still carrying real
+centripetal acceleration even though it already passed the narrow-angle/
+curvature checks. Confirmed against a real track: many walk-back run
+endpoints measured 2–4 m/s² of fit centripetal acceleration right at
+`runEnd`, well over this threshold, even though everything else about
+that vertex already looked acceptable. This check exists to catch that
+specifically and pull the boundary back a little further, past the peak
+itself, to wherever the fit's own curve has genuinely settled — not to
+decide whether a break happens at all. Confirmed on the same real track
+that this genuinely narrows both ends symmetrically, not just the tail:
+before this check existed, warm-up-side vertices commonly measured
+similarly elevated values (some over 1.5 m/s²); after, both a run's
+`startIdx` and `endIdx` consistently read well under the threshold.
 
 ### Reconnection: revisiting walk-back breaks once the full picture is known
 
@@ -338,35 +544,81 @@ from noise in hindsight, once both sides of the break are known. So, after
 the main search loop finishes and the full run list exists: revisit every
 run flagged `wasWalkedBack`, and reconnect it with the next run if —
 
-- lead-in and lead-out (the two runs' own reported boundary points) differ
-  by less than `reconnectAngle` (default `30°`) — its **own** threshold,
-  deliberately looser than the warm-up narrow angle: the two sides of a
-  real gentle jibe entry can differ more than warm-up's strict
-  self-consistency standard while still clearly being "basically the same
-  run," and
+- `headingUnwrapped`'s own range (`max − min`) across the *whole candidate
+  merged range* (from the first run's own start to the second run's own
+  end) stays under the wide angle, and
 - nothing else in the transition zone between them would have
-  disqualified it anyway — re-run the same `edgeFails`/`curvatureFails`
-  checks `computeRuns` already uses across every point from one run's end
-  to the other's start (a genuine gap, stall, device disagreement, or a
-  curvature spike past `runCurvThresh` all still block reconnection).
+  disqualified it anyway — re-run the same edge and vertex checks
+  `computeRuns` already uses (excluding fit centripetal acceleration,
+  which is warm-up/warm-down-scoped and not part of this) across every
+  point from one run's end to the other's start.
 
 If both hold, the two runs merge into one spanning the full original
-range (including whatever sat between them), inheriting the second run's
-own `wasWalkedBack` flag and termination reason. This runs to a fixed
-point, not just a single pass — a reconnected run can itself have
-inherited a walk-back flag from its new right-hand neighbor, enabling a
-further chained merge (three or more short, gentle breaks in a row all
-collapsing back into one run).
+range, inheriting the second run's own `wasWalkedBack` flag and
+termination reason. This runs to a fixed point, not just a single pass —
+a reconnected run can itself have inherited a walk-back flag from its new
+right-hand neighbor, enabling a further chained merge.
+
+This criterion went through two earlier, less robust versions before
+landing here, each replaced after a real failure surfaced its specific
+blind spot — worth keeping on record, since each fix looked complete
+until the next real track disproved it:
+
+1. **Originally**: checked lead-in/lead-out heading (the two runs' own
+   boundary points) against a separate, looser `reconnectAngle`
+   threshold. Failed on a jibe gradual enough that no single edge-to-edge
+   step exceeds much, but the *cumulative* course change across the whole
+   transition is a genuine, large reversal — confirmed with a synthetic
+   2.5°/point gradual jibe: boundary difference measured only 12.5°
+   (would have silently reconnected), against a genuine 137.5° overall
+   change.
+2. **Replaced with**: comparing the candidate range's own warm-up average
+   (a circular mean over its first few edges, bounded to the *owning*
+   run's own extent) against its own warm-down average (same, over its
+   last few), plus a peak-deviation "overshoot" check scanning the whole
+   candidate range for double-backs. Failed on a real track: three
+   consecutive walked-back runs, each independently a genuine ~90°+ turn,
+   chain-merged in two pairwise steps that each looked individually fine.
+   The deeper problem, once traced: a circular mean of several edges can
+   itself *understate* a turn — three edges turning 60° at each vertex
+   (0°→60°→120°, a genuine 120° turn) average to a warm-up of 30° and a
+   warm-down of 90°, a circular-mean "difference" of only 60°, quietly
+   losing a third of the real rotation before the comparison even runs.
+3. **Current**: `headingUnwrapped`'s own range across the whole candidate
+   merged range, described above. Sidesteps both prior failure modes at
+   once: it's a continuous, non-wrapping, sequentially-accumulated
+   quantity — never averaged, so it can't understate a turn the way a
+   circular mean can (case 2's failure), and it directly measures "how
+   far did heading ever swing, in total, anywhere in this range" rather
+   than relying on two single boundary points (case 1's). Verified
+   against the real track that broke case 2: the 232° range measured for
+   that candidate merge — comfortably over the 90° wide angle — is
+   already apparent from just the *first* of the two chained merges
+   alone, so this catches the problem at its earliest point, not
+   eventually. Also reuses the wide angle itself rather than a separate,
+   bespoke reconnection-only threshold, matching the same "would this
+   qualify as one run on its own merits" standard used everywhere else in
+   this state machine.
+
+A `reconnectEnabled` checkbox (default on) gates the entire pass — added
+specifically as an investigation tool, after case 2 above turned out to
+still be producing incorrect merges the checkbox helped isolate: setting
+`merged` to the checkbox's own state instead of always `true` means the
+`while(merged)` loop's body never executes at all when unchecked, leaving
+every run exactly as the state machine's main search found it, nothing
+reconnected.
 
 ### The edge check
 
-Beyond curvature and heading, an edge also fails (breaking the run) if:
+Beyond the vertex checks below and heading, an edge also fails (breaking
+the run) if:
 
 - **Low speed** (`runLowSpeedThresh`, default `0.3 m/s`) — `speed ≤`
-  threshold. Too slow to still be "sailing."
-- **Device disagreement** (`runDeviceDisagreeThresh`, default `5 m/s`) —
-  `fit_speed − device_speed ≥` threshold, only when device speed is present
-  on the track at all.
+  threshold, reading `fitDerived`'s own smoothed speed (§7), not
+  `derived`'s raw one. A genuine judgment call, unlike the heading/
+  curvature split above: a smoothed reading could in principle blur over
+  a brief, real stall, but a noisy raw reading can just as easily produce
+  a false one from a single bad position fix.
 - **True gap** — the edge's own interval exceeds `dtMaxVar + baseDtMs`
   (§2). The `+ baseDtMs` is deliberate slack: even a well-behaved
   fixed-rate track can transiently drop a single sample (a brief GPS
@@ -374,22 +626,65 @@ Beyond curvature and heading, an edge also fails (breaking the run) if:
   (`dtMaxVar == baseDtMs == 1000ms`), the effective threshold is `2000ms`
   — a 2s edge is tolerated, a 3s edge isn't.
 
-All three are checked the same way heading is: across every edge during
-warm-up, and against the new edge during extension. A curvature failure and
-an edge-check failure differ in *when* they're checked (curvature also
-applies to the warm-up window's own start/end vertices, per step 4) and in
-resume behavior (curvature/edge failures skip to the run's end on
-abandonment; only heading failures retry one point later).
+Device-speed disagreement used to be a third edge-check criterion here,
+but turned out unnecessary for run detection specifically once the two
+checks above already existed — dropped from this list entirely (it's now
+used only by the speed-gradient map coloring, an unrelated, purely
+cosmetic concern — see §11's track color modes discussion). A fit-based
+`|tangentialJerk|` edge check (replacing an even earlier vertex-level
+fit-accel-magnitude attempt) was also tried here and removed — not a
+data-quality problem this time, a real-world discrimination failure: too
+noisy in practice even on genuinely straight-ish segments to set a useful
+threshold, and separately unhelpful for its original motivating purpose
+(locating a jibe's true exit) since exit jerk tends to be low anyway.
+Both jerk kinematics (§3's edge-based version, §7's smoothed fit-based
+one) and their kinematics-chart plots stay — genuinely useful to look at,
+just not usable as an automatic pass/fail gate here.
+
+Both checked the same way heading is: across every edge during warm-up,
+and against the new edge during extension.
+
+### The vertex check
+
+Checked at every vertex — the transition between the edge ending there and
+the edge starting there (§3) — rather than at either edge specifically:
+
+- **Curvature** (`runCurvThresh`, default `0.15`) — `|curvature| ≥`
+  threshold, reading `fitDerived`'s own smoothed curvature (§7), not
+  `derived`'s raw one. A sharp, localized direction change concentrated
+  at a single point, as opposed to heading's own gradual, accumulated
+  drift.
+- **Tangential-accel deviation** (`runAccelDeviationThresh`, default
+  `5 m/s²`) — `|edge-based tanAccel − fit-based tanAccel| ≥` threshold
+  (§7) — the one check that's intentionally *both*, since it's measuring
+  disagreement between the two sources directly, not preferring one. A
+  large disagreement between the ordinary finite-difference acceleration
+  and the same quantity read off the independent local polynomial fit
+  means the edge-based reading at this vertex probably isn't
+  trustworthy — most often a GPS position glitch, not a genuine sailing
+  event. Because the reading is attributed to the vertex itself, not to
+  either adjacent edge, a bad reading here implicates the edge that would
+  come *next*: the vertex and its incoming edge stay part of the run
+  regardless, and only extension past this point is what stops.
+
+Checked at *every* vertex in the warm-up window uniformly now — including
+its own start and end, no exemptions (see step 4). During extension, the
+point stays included when a check fails; only further extension is
+blocked, for the same "the reading implicates what comes next" reasoning.
+Vertex and edge failures differ from heading in resume behavior on
+abandonment (step 7): both skip straight to the run's end, where only
+heading retries one point later.
 
 ### No gap-invalidation gate, deliberately
 
 Earlier in this project, points near a gap were specially excluded from run
 membership. That's gone: a point right after a gap is judged on its own
 merits — if the gap-spanning average velocity implies a real discontinuity,
-the ordinary curvature/heading/edge checks above catch it and break the run
+the ordinary vertex/heading/edge checks above catch it and break the run
 there naturally, the same way any other real turn would. The true-gap edge
 check (above) exists as a backstop specifically for gaps *without* an
-accompanying heading/curvature signal (e.g. a stall during a dropout).
+accompanying heading/curvature/accel-deviation signal (e.g. a stall during
+a dropout).
 
 ## 5. Wind direction estimation
 
@@ -441,7 +736,7 @@ If no rotation has a wide gap at either pole, there's no estimate.
 
 Even at the best (most-balanced) rotation found, if the smaller side is
 still under `WIND_EST_MIN_BUCKET_RATIO` (`0.4`, i.e. `40%` — an internal
-constant, not UI-exposed; see §9) of the larger side's distance, the whole
+constant, not UI-exposed; see §10) of the larger side's distance, the whole
 premise — a session covering both tacks roughly evenly — doesn't hold well
 enough to trust the split. No estimate. Checked against the rough split
 from step 1, before any refinement — this is a question about whether the
@@ -455,7 +750,7 @@ each bucket, computed from the two histograms built in step 1 — not by
 re-scanning every edge:
 
 - **Top-speed vector**: vector average of the bucket's own
-  `WIND_EST_TOP_SPEED_COUNT` (`2`, an internal constant — see §9)
+  `WIND_EST_TOP_SPEED_COUNT` (`2`, an internal constant — see §10)
   highest-max-speed *bins* — scoped to just this bucket, not a global
   top-N. A broad reach is typically a boat's fastest point of sail on
   either tack, so this is a proxy for "which way is more downwind, within
@@ -583,7 +878,7 @@ Two safeguards before trusting it:
   the same single pair of thresholds used everywhere this indicator is
   consulted, not two separate criteria for what's fundamentally the same
   reliability question. Both are internal constants now, not UI-exposed —
-  see §9.
+  see §10.
 - **Excluding long transitions.** Any transition over
   `WIND_INDICATOR_MAX_DURATION` (`60s`) is skipped entirely before it can
   contribute to either side's sum — a long gap between runs is more
@@ -725,10 +1020,13 @@ every point in between, a lot can be inferred about what happened there.
 Currently classified: successful jibes and tacks, one failure mode for
 each (an aborted attempt), and crash/recovery zones.
 
-Because run boundaries are already pulled back by one edge on each side
-(§4 step 7), the transition zone's own boundary points — `runA.endIdx` and
-`runB.startIdx` — serve directly as lead-in/lead-out. No separate lookup
-into the adjacent run's own content is needed.
+The transition zone's own boundary points — `runA.endIdx` and
+`runB.startIdx`, each run's own full, validated extent (§4 no longer
+shrinks these — see §4's step 7) — serve directly as lead-in/lead-out. No
+separate lookup into the adjacent run's own content is needed: the
+transition zone is exactly whatever sits between two consecutive runs'
+own reported endpoints, so those endpoints already *are* the boundary
+being asked about.
 
 Uses the effective wind direction from §5's manual textbox — auto-initialized from the calculated estimate on each fresh track load, but the actual source of truth from then on, since it's what the user sees and can override. Not `computeWindEstimate`'s return value directly.
 
@@ -919,7 +1217,7 @@ success/failure logic above, rather than folded into it):
   through-dot so the two remain distinguishable on the rare edge where a
   speed extreme and the crossing point coincide.
 
-The selection info panel (§10) surfaces the actual speed and off-wind
+The selection info panel (§11) surfaces the actual speed and off-wind
 angle at each of these points — entry, through, exit, min, max, in that
 order — for whichever transition the currently selected point falls
 within.
@@ -943,7 +1241,193 @@ alone can't always distinguish "a human changed stance" from "the boat's
 heading briefly touched the other side." Treated as an accepted limit
 rather than something a purely kinematic rule should be expected to solve.
 
-## 7. Duplicate cleanup: timestamps and coordinates
+## 7. Local polynomial path fit and artifact detection
+
+A second, independent kinematics pipeline, alongside the finite-difference
+one in §3 — not a replacement for it. Where §3's kinematics come from
+2-point and 3-point differences between consecutive recorded positions,
+this pipeline fits a small polynomial through a window of *several*
+points and reads velocity/acceleration off the fitted curve's own
+derivatives. The two disagreeing at a given point is itself a useful
+signal — see the artifact detector below.
+
+### The fit itself
+
+`fitPolynomialLS(ts, ys, order)` — ordinary least-squares polynomial
+regression via the normal equations, solved by Gaussian elimination with
+partial pivoting. Small, fixed-size systems only (order 4 by default), so
+a direct solve is simple and fast enough without a general linear-algebra
+library. Returns `null` for a degenerate system (fewer distinct `t`
+values than parameters) rather than throwing — in practice this can't
+actually happen on real track data, since duplicate-timestamp cleanup
+(§8, below) already guarantees strictly increasing timestamps, but the
+guard costs nothing and stays defensive regardless.
+
+Window size and polynomial degree are both user-configurable (`window` /
+`degree` inputs, defaulting to 8 points / degree 5) — arrived at through
+iteration, not chosen a priori. A few things worth knowing about *why*
+these specific defaults:
+
+- **Degree 5, not lower.** A degree-4 fit already lets acceleration vary
+  continuously across the window (see below), but its own acceleration
+  curve — `x''(t) = 2a2 + 6a3·t + 12a4·t²` — is only quadratic in `t`,
+  which has constant curvature and can never itself change concavity.
+  Degree 5 makes acceleration cubic in `t`
+  (`x''(t) = 2a2 + 6a3·t + 12a4·t² + 20a5·t³`), which *can* — i.e. the
+  acceleration curve itself can inflect within the window, not just rise
+  or fall monotonically. Real sailing forces (a gust building then
+  easing, a sheet correction overshooting slightly before settling) can
+  genuinely have that shape; degree 4 structurally can't represent it no
+  matter how the coefficients land.
+
+  Worth being explicit that this is the *opposite* situation from the
+  earlier degree-3-vs-4 finding, not an extension of it: that finding
+  showed degree 3 changed nothing at a *symmetric* window's exact center,
+  because odd-order terms provably vanish there. The window here is
+  asymmetric by construction (`numBefore=4`, `numAfter=3` for the N=8
+  default — see the next section), so that provable-vanishing property
+  doesn't apply, and adding the degree-5 term genuinely changes the
+  fitted result — confirmed numerically against a synthetic
+  exponential-transient trajectory, where the fitted `a1` (velocity) and
+  `a2` (half of acceleration) both measurably shifted between degree 4
+  and degree 5 for the same window and same data, rather than matching
+  to several decimal places the way the degree-3-vs-4 case did.
+- **8 points, not fewer or more.** With 6 coefficients (degree 5) and 8
+  points, the fit stays only mildly over-determined (2 "extra" points
+  beyond exact interpolation — the same margin as the earlier 7-point/
+  degree-4 configuration, so the smoothing-vs-snugness balance doesn't
+  shift just because the degree went up) — enough to smooth out one or
+  two genuinely bad points without drifting far from what was actually
+  recorded, while still snug enough to capture a real, legitimate
+  maneuver rather than averaging it away.
+
+### Evaluation point: centered
+
+For `N` window points there are `N-1` edges; the point evaluated is
+whichever point *ends* the middle-most edge — `numBefore = floor(N/2)`
+points before it, `numAfter = (N-1) - numBefore` after. For odd `N` this
+lands exactly centered. For even `N` (the default, 8: `numBefore=4`,
+`numAfter=3`), there are two equally-central vertices (the middle edge's
+two endpoints), and the evaluation point has to be one actual recorded
+vertex, not an interpolated halfway point between them — so one of the
+two gets picked, landing one point off true-center. Not a deliberate
+choice between them; just an unavoidable consequence of needing an
+integer point count on each side of a real vertex when the edge count is
+even.
+
+A trailing window (evaluate at the window's own last point, using only
+preceding history) was tried first and reverted. The appeal was
+avoiding a centered window's own limitation — needing points from both
+sides means a point sitting just before a gap/crash needs to look past
+it too, losing kinematics there along with everything actually inside
+the gap. But **leverage** (how much a fitted curve's value at a point
+depends on that point's *own* observed value, vs. everyone else's in
+the window; formally the diagonal of the regression hat matrix,
+`H = X(XᵀX)⁻¹Xᵀ`) at a window's true trailing endpoint measured at 0.996
+for the current default (8 points, degree 5) — essentially 1, meaning the
+fit was nearly forced through that one point's own value, giving away
+almost all the smoothing the wider window was supposed to provide.
+Reverted back to centered, where leverage at the evaluation point is
+meaningfully lower (0.55 for the same 8-point, degree-5 configuration) —
+real smoothing, at the cost of needing forward history and therefore
+losing kinematics for the last few points before a gap (the gap-handling
+discussion below touches the practical effect of this).
+
+Leverage is fundamentally tied to how informative a point is about *how
+the curve is changing*, and points at a window's extremes are
+unavoidably more informative about that than central ones, for any model
+expressive enough to represent motion at all — the only way to get
+uniform leverage is a model with no positional sensitivity whatsoever,
+literally just fitting the mean, which can't represent a path. So this
+isn't a shortcoming specific to this implementation; it's what any
+windowed polynomial fit trades against, and centered is simply the
+better side of that trade for this tool's purposes.
+
+### Kinematics from the fit's own coefficients
+
+No finite differences, and no averaged-adjacent-edge-velocity projection
+trick (the trick §3's `tanAccel`/`centripetalAccel` need, since
+finite-difference velocity is only ever an edge average, never truly
+instantaneous). A polynomial's derivatives are exact at any point: with
+`t` re-centered so the evaluation point sits at `t=0`,
+`x'(0) = a1` and `x''(0) = 2·a2` directly from the fitted coefficients,
+regardless of the polynomial's degree — terms beyond `a2` shape the
+curve away from `t=0` but don't affect these two derivatives *at* `t=0`
+at all. The fit already provides a genuinely instantaneous velocity at
+the evaluation point, so tangential/centripetal/curvature use the same
+formulas as §3's pass 2, just with this velocity as the projection
+direction directly, nothing to average.
+
+**Does not skip windows spanning a true gap.** Tried and reverted: fitting
+across a genuine dt gap (device dropout — a crash, most commonly) asks
+the curve to smoothly reconcile two disconnected local trends across a
+time span with no data to constrain it in between, which reliably
+produces a loop or a large excursion on the map (verified: a synthetic
+crash scenario showed the fit overshooting to more than double the
+plausible position range in the middle of the gap). But the *kinematics*
+derived from it — velocity/acceleration at the evaluation point
+specifically — still came out as reasonable values in practice, and
+skipping the fit entirely near every gap lost real data for the several
+points right before a crash, which is often the most useful part to see.
+Accepted as a known, cosmetic-only quirk: the map may show a strange loop
+near a crash, but the numbers stay usable.
+
+### Two derived diagnostics
+
+**Tangential-acceleration deviation** (`findSpeedLagArtifacts`): flags any
+point where `|derived[i].tanAccel - fitDerived[i].tanAccel|` exceeds a
+configurable threshold (default 1 m/s²). Went through several earlier,
+more elaborate versions before landing here — a 4-edge windowed jump/dip
+comparison with a heading-consistency filter, then a simpler EWMA-based
+deviation check — each needing progressively more special cases to catch
+real artifacts without also flagging genuine turns or genuine
+acceleration. The fit is a better local trend line than either
+predecessor specifically because it doesn't lag during real acceleration
+the way a trailing average does (a backward-difference edge speed is
+structurally an average velocity over the *past* interval, so it
+systematically undershoots during real acceleration and overshoots during
+real deceleration — confirmed against synthetic exponential-approach
+acceleration, where the fit tracked the true instantaneous speed far
+more closely than the edge speed did). Compares *acceleration* rather
+than speed itself: a position glitch shows up as a sharp, transient spike
+in how quickly speed is changing, which acceleration is directly built to
+detect, rather than as an offset in the speed value itself, which the
+fit's own smoothing already partially absorbs.
+
+Marked on both the map (bright red X, distinct shape/color from every
+other marker) and the kinematics charts (same marker, positioned at
+whichever metric is currently plotted). A "delete speed-lag points"
+button removes them and recomputes, mirroring `removeDuplicateCoordPoints`'s
+pattern of validating the result before committing to the `points` array.
+As of this writing, deletion is the only corrective action offered — see
+the note at the end of this document for a more targeted correction
+approach that was designed but not yet implemented.
+
+**Arc-length deviation**: the fit's own path length (finely sampled — 30
+points, summed as a piecewise-linear approximation) minus the actual
+edge-based path length (straight-line sum between the real recorded
+points), over the same window. A snugly-fitting segment has these nearly
+equal; a problematic one has them diverge — but the *sign* carries real
+information, not just the magnitude: a gap-induced loop overshoots
+(positive — the fit travels further than the real points did), while a
+sharp, isolated spatial spike gets smoothed over/cut short by the
+polynomial (negative — confirmed against a synthetic spike test, -11.5 at
+the glitch itself and an even larger -21.9 at its immediate neighbor,
+whose own window still contains the glitch without it being the
+evaluation point). Available as its own kinematics-chart plot
+("path length deviation"); has no edge-based counterpart, since it's
+inherently a fit-vs-edges comparison rather than a standalone measurable
+quantity.
+
+### On the map: a live curve around the current selection
+
+`computeLocalCubicFit()` — the same fit, same window/degree settings,
+built around whichever point is currently selected, sampled at 3× the
+window's own point count and drawn as a dashed curve on the track map.
+Purely a visualization; the swept `computeFitKinematics()` above is the
+one that actually powers the artifact detectors and chart overlays.
+
+## 8. Duplicate cleanup: timestamps and coordinates
 
 Two distinct data artifacts, each handled separately, since neither
 cleanup catches the other's failure mode.
@@ -970,14 +1454,27 @@ projected position unchanged — `project()` computes each point
 independently with no dependency on its neighbors, so removing other
 points never invalidates a kept point's own projection.
 
-For a run of points sharing a timestamp, rather than arbitrarily keeping
-whichever the device happened to log first, keeps whichever *one* point
-minimizes the difference between the edge distance immediately before it
-(from the nearest already-kept point) and the edge distance immediately
-after it (to the next distinct-timestamp point) — the point that best
-preserves a smooth, consistent step size through this moment, rather than
-risking an arbitrary pick that leaves a large jump on one side and a tiny
-one on the other.
+For a run of points sharing a timestamp, keeps whichever *one* point
+minimizes the difference between the **speed** implied immediately before
+it (distance to the nearest already-kept point, divided by the time to
+it) and the speed implied immediately after it (same, to the next
+distinct-timestamp point) — not raw distance. The distinction matters:
+every candidate in the run shares the identical timestamp, so the time
+split on either side (`dtBefore`, `dtAfter`) is *fixed* regardless of
+which candidate gets kept — only the resulting distances (and therefore
+speeds) vary by candidate. An earlier version balanced distance directly
+(`|distBefore - distAfter|`), which seemed reasonable but has a real
+flaw: the typical real cause of a duplicate timestamp is a point with a
+genuinely correct position that got snapped to the wrong time, leaving
+`dtBefore` and `dtAfter` asymmetric (one side effectively swallowed the
+sample that should have been there). Balancing distance while ignoring
+that asymmetry lets the longer-duration side's computed speed come out
+silently lower (or the shorter side's silently higher) even when the true
+physical speed through here was roughly steady — confirmed with a
+synthetic case (`dtBefore=1s`, `dtAfter=2s`): distance-balancing picked a
+point implying a jump from 15 m/s to 7.5 m/s across it, while
+speed-balancing picked the point implying a flat 10 m/s on both sides,
+the actual constant-speed answer the scenario was built from.
 
 ### Duplicate coordinates
 
@@ -987,15 +1484,23 @@ artifact (re-logging the same fix across several timestamps — a
 position noise; an exact repeat is a data artifact.
 
 Same balance principle as duplicate timestamps, transposed: there,
-position varied within a run sharing one timestamp, so the balance metric
-was distance; here, time varies within a run sharing one position, so the
-balance metric is time. Rather than arbitrarily keeping the run's first
-(earliest) point, keeps whichever *one* point minimizes the difference
-between the time gap immediately before it (from the nearest already-kept
-point) and the time gap immediately after it (to the next
-distinct-position point) — letting the resulting wider gap be handled by
-the ordinary gap/true-gap machinery instead of producing a fake
-zero-velocity segment.
+position varied within a run sharing one timestamp, so distance was the
+free variable and speed got balanced by choosing *where* to put the
+shared time; here, time varies within a run sharing one position, so
+distance is fixed instead (every candidate shares the same position) —
+but the thing actually worth balancing is still **speed**, not raw time.
+An earlier version balanced time directly (`|dtBefore - dtAfter|`), which
+turns out to have the same flaw the timestamp cleanup's own earlier
+version did, just with distance and time swapped: a synthetic case with
+`distBefore=10m`, `distAfter=20m` (points 10m apart before the stutter,
+20m apart after) showed time-balancing picking the timestamp splitting
+the interval exactly in half, which implies a flat speed *doubling*
+across it (5 m/s to 10 m/s) — because equal time over unequal distances
+is unequal speed, not equal. Speed-balancing instead picks whichever
+timestamp minimizes the difference between the speed implied immediately
+before it and the speed implied immediately after — letting the
+resulting wider gap be handled by the ordinary gap/true-gap machinery
+instead of producing a fake zero-velocity segment.
 
 This runs **automatically, silently**, immediately after a fresh file
 load. "Restore original track" deliberately does **not** re-run it — that
@@ -1003,27 +1508,31 @@ gives back the true, unfiltered file if you want to inspect what the
 automatic pass found. The "remove duplicate-coord points" button remains
 available for a manual re-run at any time, with a summary alert.
 
-## 8. GPX export
+## 9. GPX export
 
 Saves the current (post-editing) points as standard GPX 1.1, preserving
 `<speed>` and `<ele>` where present. Filename defaults to
 `<original-basename>_t.gpx`.
 
-## 9. UI controls reference
+## 10. UI controls reference
 
 | Control | Default | Meaning |
 |---|---|---|
-| run breaks if \|curvature\| ≥ | `1` /m | hard curvature threshold (§4 step 4/5) |
-| heading deviates ≥ (wide angle) | `90°` | extension tolerance from the fixed reference |
-| speed ≤ | `0.3` m/s | low-speed edge failure |
-| derived−device speed ≥ | `5` m/s | device-disagreement edge failure (if device speed present) |
-| warm-up validated at ≥ (narrow angle) | `10°` | warm-up + trailing-straightness tolerance |
-| warm-up length | `5` s | minimum warm-up window duration |
-| min run duration | `12` s | runs shorter than this are abandoned |
-| trailing straightness sample | `5` edges | tail window size for step 6 |
-| reconnect walk-back breaks if lead-in/out differ < | `30°` | §4 reconnection pass — its own, looser threshold |
+| run breaks if \|curvature\| ≥ | `0.15` /m | hard vertex-check threshold (§4 step 4/5), fit-based |
+| heading swings ≥ (wide angle) anywhere in the run | `120°` | range-based extension tolerance, edge-based |
+| speed ≤ | `0.3` m/s | low-speed edge failure, fit-based |
+| tangential accel deviates (fit vs edge) ≥ | `5` m/s² | the other hard vertex-check threshold (§4 step 4/5, §7) |
+| warm-up/trailing vertices need fit centripetal accel < | `1.2` m/s² | §4's warm-up/warm-down-only check — never checked during extension |
+| warm-up validated at ≥ (narrow angle) | `10°` | warm-up + trailing-straightness tolerance, edge-based |
+| warm-up/trailing window needs ≥ | `2` edges | minimum edge count — both must be satisfied, not either alone |
+| warm-up/trailing window needs ≥ | `2` s | minimum duration — same accumulation logic used forward (warm-up) and backward (trailing) |
+| min run duration | `15` s | runs shorter than this are abandoned |
+| reconnect walk-back breaks | on (checkbox) | gates §4's entire reconnection pass — added as an investigation tool; unchecking leaves every run exactly as the main search found it |
 | loose tack success: under | `20` s | §6 loosened tack path — total transition duration cap |
 | loose tack success: ≤ | `5` s | §6 loosened tack path — total time below low-speed threshold, summed |
+| local path fit window | `8` points | §7 — arrived at through iteration; see there for the leverage/smoothing reasoning |
+| local path fit degree | `5` (quintic) | §7 — see there for why degree 5 lets the fitted acceleration curve itself inflect, which degree 4 structurally cannot |
+| flag if tangential accel deviates ≥ | `1` m/s² | §7's artifact detector — edge-based vs. fit-based tangential acceleration |
 
 **Wind panel** (§5) — title row has a "show/hide details" toggle
 (default hidden) covering everything below the two textboxes:
@@ -1034,12 +1543,15 @@ Saves the current (post-editing) points as standard GPX 1.1, preserving
 | tack split (textbox + recalculate button) | calculated, or blank | independent split-boundary override; drives a live bucket recompute when it meaningfully differs from the calculated split — see §5 |
 
 **Track panel** — title row has a "show legend" toggle (default hidden),
-a "compass: corner / follow" toggle (default corner — §10), a "color: by
-type / by speed" toggle (default type — §10), and a "show/hide map
-background" toggle (default hidden, needs network — §10).
+a "compass: corner / follow" toggle (default corner — §11), a "color: by
+type / by speed" toggle (default type — §11), and a "show/hide map
+background" toggle (default hidden, needs network — §11).
 
-**Global**: a "speed unit: m/s / km/h / knots" selector in the controls
-row affects every displayed speed throughout the tool (§10).
+**Global**: a "speed unit: m/s / km/h / knots" selector and a "length
+unit: km / nm" selector in the controls row — the former affects every
+displayed speed throughout the tool (§11), the latter currently affects
+only the session-length stat (§11's header stats bar). 1 nautical mile
+is treated as exactly 1852m, not an approximation.
 
 A handful of wind-estimation values were UI-exposed while the algorithm
 was under active iteration; now settled, they're plain constants in code
@@ -1055,7 +1567,7 @@ instead (search for the name to find and tweak):
 | `WIND_INDICATOR_MAX_DURATION` | `60` s | §5 step 5 — likely a recording pause, not a real maneuver |
 | `WIND_OVERRIDE_WEAK_SPEED_THRESH` | `15°` | §5 step 5 — both buckets' fast-vs-median deviation must be under this to trigger the override |
 
-## 10. UI layout and mobile support
+## 11. UI layout and mobile support
 
 ### Header stats bar
 
@@ -1063,17 +1575,27 @@ Two groups, wrapped onto its own line via a `flex-basis:100%` spacer
 (plain `<br>` doesn't force a line break in a `flex-wrap` container). A
 raw group — point count, duration, sampling interval — reflects the file
 as loaded, unaffected by any analysis. A "Processed:" group reflects the
-run-detection/classification results: session duration (first run's
-start to last run's end — deliberately narrower than the track's own
-total duration, trimmed of any warm-up, breaks, or dead time before/after
-the session itself), run count as a percentage *of that session
+run-detection/classification results: session duration and session length
+(first run's start to last run's end, and the summed edge distance over
+that same span — deliberately narrower than the track's own total
+duration/length, trimmed of any warm-up, breaks, or dead time
+before/after the session itself; session length sums *every* edge in the
+span, not just run-classified ones, matching session duration's own "the
+whole trimmed session" scope), run count as a percentage *of session
 duration* specifically (not the full track — diluting by dead time the
 session itself doesn't include would understate how much of the actual
 session was spent running), jibe/tack counts with their failed
-counterparts, crash/recovery count, and max speed — both derived and
-device, when present — restricted to edges that are part of a run, a
-jibe, or a tack specifically, so a stall or a gap-triggered crash edge
-can't inflate the reported maximum.
+counterparts, crash/recovery count alongside its own summed total
+duration (so a session with several short dropouts reads differently
+from one with a single long one, not just by count), and max speed —
+derived, local-path-fit (§7), and device, each when available —
+restricted to edges that are part of a run, a jibe, or a tack
+specifically, so a stall or a gap-triggered crash edge can't inflate the
+reported maximum.
+
+Session length (and only session length, currently) respects the
+separate length-unit selector (km / nm — §10); every speed figure
+respects the speed-unit selector as usual.
 
 Recomputed on every `redrawAll()`, not just once at file load — folded in
 after fixing a real staleness bug: it used to run once, early, before the
@@ -1084,20 +1606,38 @@ zero jibes/tacks, and nothing ever refreshed it afterward.
 ### Panel order
 
 Everything is a single vertical stack (`display:flex; flex-direction:
-column`, not the two-column grid this file used earlier): header, track,
-wind estimate, then the kinematic plot, then the threshold/action
-controls. Wind estimate comes before track deliberately — it's the
-smaller, usually-collapsed panel, and reading order roughly matches "set
-up wind, then look at the track" rather than the reverse.
+column`, not the two-column grid this file used earlier): header, wind
+estimate, run detection, track, then the kinematic plot, then the
+threshold/action controls. Wind estimate and run detection both come
+before track deliberately — they're the smaller, usually-collapsed
+panels, and reading order roughly matches "set up wind and tune
+detection, then look at the track" rather than the reverse.
 
-The five kinematic plots (speed, tangential acceleration, centripetal
-acceleration, heading, curvature) collapsed from five separate always-
-visible canvases into one canvas plus a `<select>` dropdown
-(`kinematicSelect`) choosing which metric renders into it. A
-`KINEMATIC_PLOTS` config maps each dropdown option to the `key`/`opts`
-`drawTimeSeries` needs — the same values that used to be hardcoded per
-canvas. Pan/zoom/tap interaction (`attachTimeInteraction`) is attached
-once, to the single shared canvas, instead of five times.
+Run detection's own panel follows the exact same collapsed-by-default,
+"show/hide details" pattern wind estimate already established
+(`setupToggle`, reused directly rather than duplicated) — added once the
+run-detection controls, originally a single flat row buried in the
+threshold/action controls panel at the bottom of the page, grew past the
+point a flat row could present clearly. Split into four grouped rows
+inside it (vertex checks, edge checks, warm-up/trailing-only checks, run
+acceptance — matching §4's own conceptual grouping, not just visual
+convenience) rather than moving the flat row over unchanged. Loose-tack
+success timing (§6, not run detection itself despite living in the same
+original row) and local-path-fit/speed-lag settings (§7, shared by more
+than just run detection) stayed in the threshold/action controls panel
+rather than moving along with it.
+
+The kinematic plots (speed, tangential acceleration, centripetal
+acceleration, heading, curvature, path length deviation, tangential jerk,
+centripetal jerk — eight now, path length deviation and the two jerk
+plots added after the original five-canvas collapse below) live in one
+canvas plus a `<select>` dropdown (`kinematicSelect`) choosing which
+metric renders into it, rather than five (now eight) separate always-
+visible canvases. A `KINEMATIC_PLOTS` config maps each dropdown option to
+the `key`/`opts` `drawTimeSeries` needs — the same values that used to be
+hardcoded per canvas. Pan/zoom/tap interaction (`attachTimeInteraction`)
+is attached once, to the single shared canvas, instead of once per
+canvas.
 
 ### Sticky navbar
 
@@ -1228,9 +1768,11 @@ the mode is active.
 
 - A true dt gap (`edgeGapFails`) — the derived speed there is a
   gap-spanning average, not a real instantaneous reading.
-- A derived/device speed disagreement (the same check `computeRuns` uses
-  to break runs on this basis — if the two don't trust each other,
-  neither does this).
+- A derived/device speed disagreement (`runDeviceDisagreeThresh`, default
+  `5 m/s`) — its own, gradient-only threshold now; no longer tied to run
+  detection at all (§4 dropped this criterion there once the vertex-level
+  checks already covered the same real problems without needing device
+  speed to be present).
 - A `crash_recovery` zone specifically — real motion, but not ordinary
   sailing speed.
 - Anything outside any run or transition entirely (unclassified) —
@@ -1238,9 +1780,16 @@ the mode is active.
   leaving the grey base path visible underneath rather than needing an
   explicit grey re-draw.
 
-The gradient's min/max range is computed **only** from eligible edges, so
-a gap or disagreement edge with an anomalous speed value can't skew the
-color scale for the legitimate data. The track legend (toggleable, same
+The gradient's min/max range is computed from the **local path fit's**
+speed (§7) at each eligible point, not the raw edge speed — the fit is a
+second, independent speed estimate that naturally smooths out an isolated
+glitched edge, so one bad point can't drag the whole color scale's bounds
+along with it, without needing an external device reading (which isn't
+always present anyway) to provide that protection. Individual edges are
+still colored by their own actual (raw) derived speed, mapped into this
+fit-derived range — only the range's bounds come from the fit, so the
+displayed gradient still reflects real edge-to-edge variation rather than
+a smoothed-over version of it. The track legend (toggleable, same
 panel) rebuilds itself per mode — type mode shows the usual swatches;
 speed mode shows a single gradient bar sampled directly from the same
 `speedToColor` function used for the actual edges (not a separately
@@ -1318,6 +1867,146 @@ projected onto the wind axis, positive for net progress toward upwind and
 negative toward downwind — computed the same way regardless of category,
 using whatever the effective (manual textbox) wind direction currently
 is.
+
+## 12. Track artifacts: a taxonomy and a design not yet built
+
+**Nothing in this section is implemented.** §7's tangential-acceleration
+and arc-length deviation detectors exist and work; everything below is
+design discussion toward a *correction* mechanism, which does not exist
+yet — the only corrective action currently offered for a flagged point is
+deletion (§7). Recorded here so the reasoning isn't lost before it's
+built.
+
+### What the detectors are actually catching
+
+Working through real flagged segments surfaced (at least) three distinct
+underlying causes, not one:
+
+- **GPS jitter.** A point's *timestamp* is trustworthy but its *position*
+  is slightly off — usually on an otherwise straight-ish stretch. The
+  point still sits close to the true route; it's placed at the wrong
+  point *along* that route for its timestamp. This warps the two edges
+  touching it (shrinks one, stretches the other, or vice versa),
+  producing jagged tangential acceleration without any real path-shape
+  problem. This is the case the deviation detectors were originally
+  built for, and the case any future correction mechanism should target.
+- **Gapless stalls, holds, and in-water activity** (uphauling, climbing
+  back on the board, setting up a waterstart, actual swimming). Distinct
+  from jitter, and — per direct observation — distinct from *each other*
+  in a way that matters:
+  - A **controlled, deliberate stall** (e.g. luffing to let another
+    vessel pass) reads *quiet* to the detector — in one tested example,
+    only a single flagged point, and only at a lowered threshold (0.5
+    m/s² rather than the 1 m/s² default). The mechanical explanation:
+    the recording device (wrist-worn) stays rigidly coupled to the boom
+    through the rig, so even near-stationary motion is still a faithful
+    proxy for the board's own motion. There's a real, if small, coherent
+    signal the whole time.
+  - **Uphauling, climbing back on, or a waterstart** likely reads
+    differently — the hand moves independently of the board (pulling
+    line, swimming strokes, repositioning relative to the rig), so the
+    device is no longer measuring "where is the board" for that
+    stretch. Not degraded signal about the thing of interest; not a
+    signal about that thing at all for the duration. Untested as of this
+    writing — a natural follow-up whenever a track with a genuine
+    swim/uphaul segment is available, to see whether it produces the
+    dense, sustained flagging the controlled-stall case didn't.
+- **Crash gaps** (device dropout). Already and separately caught by `dt`
+  (§4's `edgeGapFails`, reused throughout — §6, §7). The deviation
+  detectors *can* also flag these (a large `dt` gap can produce a fit
+  loop or excursion — §7), but this is redundant detection of something
+  already known via a cleaner signal, not a new capability. Useful as a
+  cross-check (both signals agreeing is reassuring; `dt` saying gap but
+  deviation being unremarkable nearby would be odd) but `dt` should keep
+  priority — a flagged point that's already part of a known
+  `crash_recovery` zone (already excluded from speed stats — §11's
+  stats-bar note) shouldn't be routed into whatever correction workflow
+  eventually exists for jitter.
+
+The practical implication: only the jitter case is a good target for
+position *correction*. The stall/swim case, if the controlled-vs-active
+distinction above holds up, may not need new discrimination logic at
+all — the *existing* deviation detector, applied to a low-speed segment,
+may already read differently for "held still" vs. "actively moving in
+the water" without anything new being built, simply because the latter
+genuinely has no coherent board-path to recover. Worth testing directly
+before building anything to handle it.
+
+### A correction design: separate shape from pacing
+
+The first design considered — replace a flagged point's position with
+wherever §7's own fit predicts for that timestamp — has a real flaw: it
+would discard the point's own recorded position, which (per the jitter
+diagnosis above) is usually *not* the actual problem; the position is
+close to correct, only its pacing along the route is off. Overwriting it
+with a fresh fit evaluation throws away good information and — since the
+fit can itself loop or overshoot under some conditions (§7) — risks
+moving a fine point to a *worse* spot.
+
+The alternative worked out instead: treat "what the route looks like"
+and "how far along it a point should be at a given time" as two separate
+fits, not one.
+
+1. **Shape.** A curve through the segment's own recorded positions,
+   parameterized by something neutral like cumulative chord length —
+   *not* time. Answers "what does the route look like here," independent
+   of pacing. Includes the flagged points' own positions, since (for the
+   jitter case) those are trusted.
+2. **Pacing.** A separate fit of arc-length-along-the-shape-curve as a
+   function of time, built using *only* the segment's non-flagged
+   (trusted) time/arc-length pairs.
+3. **Correction.** For each flagged point: look up the pacing fit's
+   predicted arc-length position at that point's own (trusted) timestamp,
+   then map that arc-length back onto the shape curve to get a corrected
+   `(x, y)`.
+
+The result is guaranteed to lie on essentially the same curve the
+original flagged point helped define in step 1 — nothing is invented off
+the visible route — just redistributed along that curve according to
+pacing derived only from trusted data. This is a meaningfully different
+guarantee than "evaluate the existing single fit at this timestamp,"
+which doesn't separate the two questions and remains partly
+self-referential.
+
+**Known open issue, not resolved:** step 1's shape curve, when several
+consecutive points are flagged, still uses those points' own mutual
+chord-length spacing to build its parameterization — and that spacing is
+itself computed from the distances between points whose pacing (not
+position, but the two aren't perfectly separable at the margin) is in
+question. A milder, second-order version of the self-reference problem
+this design was meant to solve outright, not fully escaped. Possibly
+fine in practice; possibly wants the shape curve's parameterization
+anchored only to the segment's trusted points instead. Unresolved as of
+this writing.
+
+**Segment-length question, also unresolved:** a short, isolated glitch
+(a point or two) seems like a safe target for this. A long stretch of
+consecutive flagged points — a genuine multi-second dropout, especially
+one where a real maneuver might have happened inside it — may not be
+well-represented by a single polynomial at all. Whether there's a length
+past which correction should refuse and fall back to exclusion (§7's
+existing option) instead of attempting a fit, and if so where that
+length sits, hasn't been decided.
+
+**A cheap validation step worth keeping in mind:** once a segment is
+corrected, re-running §7's own tangential-acceleration detector against
+the corrected result is a direct, nearly-free check of whether the
+correction actually worked — a still-flagged result after "fixing" it is
+a clear signal something's wrong (segment too long, anchors too sparse,
+wrong degree) rather than something to trust blindly. Device speed,
+where present, is a second independent check for the same purpose — it's
+not derived from position at all, so it can't be fooled by anything
+wrong with position, and would be expected to agree with a genuinely
+successful correction.
+
+**Whatever gets built here should look different from every other action
+this tool takes on a track.** Deletion (§7) is currently the most
+invasive existing action; position correction goes further, since it
+asserts a *specific* corrected value rather than just admitting
+distrust. Any implementation should be opt-in, visually distinct on both
+the map and the kinematics charts (not blended into the existing
+"flagged" or "normal" appearance), and reversible the same way "restore
+original track" already reverses the duplicate-cleanup passes (§8).
 
 ## License
 
