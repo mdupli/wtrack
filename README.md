@@ -325,13 +325,16 @@ Two angle thresholds do different jobs:
 - **narrow angle** (`runNarrowHeadingThresh`, default `10°`) — validates a
   candidate warm-up window as a genuinely stable direction, and separately
   validates a run's own trailing edge (see step 6).
-- **wide angle** (`runBreakHeadingThresh`, default `120°`) — how far
+- **wide angle** (`runBreakHeadingThresh`, default `90°`) — how far
   heading can swing, in total, anywhere across the run so far (tracked as
   a running `max − min` range, not distance from one fixed reference —
   see step 5) before that's a real point-of-sail change, not just
   wiggle. Set intentionally generous — see the walk-back mechanism in
   step 5, which is what makes a large tolerance here safe rather than
-  just permissive.
+  just permissive. Briefly loosened to `120°`, then reverted — too
+  generous in practice: the very start of a genuine failed jibe attempt
+  could still fall within that wider range, letting extension absorb it
+  as if it were still part of the steady-state run rather than a break.
 
 ### State machine
 
@@ -581,10 +584,14 @@ similarly elevated values (some over 1.5 m/s²); after, both a run's
 `startIdx` and `endIdx` consistently read well under the threshold.
 
 **Device-speed deviation** (`runWarmupDeviceSpeedDeviationThresh`,
-default `5 m/s`) is scoped identically — warm-up and trailing straightness
-only, never extension — but exists for an entirely different reason: it's
-the one check in this whole state machine that reads something *outside*
-this app's own kinematics entirely. `|fitDerived[i].speed −
+default `2 m/s`, toggleable via `runDeviceSpeedDeviationEnabled` — added
+specifically to let this be disabled for investigating how well it
+performs against real tracks without also losing the other warm-up/
+warm-down checks) is scoped identically — warm-up and trailing
+straightness only, never extension — but exists for an entirely
+different reason: it's one of two checks in this whole state machine
+(the other is gap debt, below) that reads something *outside* this
+app's own kinematics entirely. `|fitDerived[i].speed −
 points[i].rawSpeed| ≥` threshold, checked only where a device speed
 reading is actually present in the file (a no-op, not a failure, when
 it's missing — most tracks don't have one at all).
@@ -615,6 +622,112 @@ deliberately different, much narrower reintroduction, scoped specifically
 to warm-up/warm-down (not every edge in a run) and motivated by a
 concrete failure case the other checks provably can't see, not a return
 to the original general-purpose version.
+
+**Gap debt** (`runGapDebtEnabled`, `runGapDebtPaybackWeight`,
+default `0.67`) targets the exact same "path home" failure mode as
+device-speed deviation, but without depending on device speed being
+present at all — most tracks don't have it, and this check is meant to
+catch the same artifact on the tracks that don't. Warm-up only, like the
+checks above — not trailing straightness, and this is a genuine, not just
+consistency-driven, restriction: the artifact is only ever encountered
+immediately after a gap, which is exactly where a *new* run's own
+warm-up begins. A run's own tail can't be immediately after a gap in the
+same way — a gap edge would already have excluded itself from extension
+via the edge check long before reaching anywhere near the tail.
+
+Its own checkbox defaults on or off per track, not to a fixed value —
+set once, right after `computeDerived` runs at load time (`loadFromText`
+— `hasDeviceSpeed` is already known by then), to `!hasDeviceSpeed`.
+The framing is deliberately "fallback," not "second opinion": device-
+speed deviation is the more direct check whenever a device speed reading
+actually exists, so gap debt only defaults on for the tracks where that
+more direct check has nothing to read at all. Either checkbox can still
+be flipped by hand afterward — this only sets where each one starts.
+
+Precomputed once for the whole track as a sequential running accumulator
+— the same "computed once up front, consumed as a local array lookup"
+pattern `headingUnwrapped` (§3) uses, for the same underlying reason: the
+thing being tracked (how much unpaid "debt" exists at this point) is
+inherently cumulative, not a per-point property answerable from that
+point alone.
+
+```
+debt[0] = 0
+for i = 1 .. n-1:
+  edgeDist = |points[i] - points[i-1]|              — straight-line distance
+  if debt[i-1] <= 0 and edgeGapFails(i):  debt[i] = debt[i-1] + edgeDist
+  else:                                   debt[i] = max(0, debt[i-1] - paybackWeight * edgeDist)
+```
+
+A gap edge encountered while the debt is already clear **adds** its own
+straight-line jump distance, starting a new debt cycle. Every *other*
+edge while a debt is outstanding — gap or not — **pays back** against
+that debt, but only at `paybackWeight` (default `0.67`) of its own
+distance — so it takes genuinely traveling roughly `1/paybackWeight`
+times (**~1.5×** at the current default) a gap's own jump distance to net
+it back out, not just matching it edge-for-edge. That asymmetry is the
+whole mechanism: a "path home" drift-back only ever covers something on
+the order of the gap's own jump distance before rejoining the true track,
+which nets out to a substantial remaining debt rather than clearing it
+— while a genuine run, unrelated to the gap, keeps accumulating real
+distance well past whatever the gap owed. Tuned twice already: the
+original default of `0.5` (needing **2×** the gap's own distance) turned
+out too aggressive in general — it kept legitimate track excluded from
+warm-up for longer than the artifact itself justified, so it was loosened
+to `0.8` (**1.25×**) once real tracks showed the stricter setting eating
+into genuine sailing, not just the drift-back artifacts it was meant to
+catch. But `0.8` then proved too loose for at least one specific real
+track, where the fake "path home" segment still qualified — `0.67`
+(~1.5×, `2/3` rounded) is the current middle ground between those two
+failure directions, not a value derived from any particular formula.
+
+Counting *any* edge after the first gap as payback — not just non-gap
+edges — is itself a correction, not the original design: earlier, only
+non-gap edges paid back, and every gap edge added its own distance
+unconditionally, regardless of direction. That broke on a real track
+where two gaps happened close together and the second one's own jump
+happened to land back toward the true position — a genuine correction,
+not a further departure. The original rule added both distances together
+anyway, since it only ever asked "is this edge a gap" to decide whether
+to add, never which direction it moved — a correcting second gap
+ballooned the debt instead of reducing it, and cost two entire genuine
+runs before the inflated debt could clear. The fix: only a gap
+encountered while the debt is already at zero starts a new debt cycle;
+once a debt is outstanding, every subsequent edge — including a further
+gap — counts toward paying it off. Confirmed directly with a synthetic
+two-gap case (a 90m jump, then a second gap landing almost exactly back
+on the true track): the debt swelled to over 150m under the original
+rule, but dropped to around 30m under the corrected one, after the
+identical two edges.
+
+The debt clamps at zero rather than going negative — a run's own
+genuine distance doesn't bank "credit" against some future gap; each
+gap's own debt is paid off only by distance traveled after it. `warmupOk`
+requires every vertex in the window to have already netted its own
+debt to zero; a vertex still carrying unpaid debt hasn't traveled far
+enough past its most recent gap to be trusted as a genuine run start yet.
+
+Verified directly against two synthetic cases built specifically to match
+each failure mode in turn. The original single-gap "path home" case: a
+normal run, a gap that jumps 80m, an 8-point "drift back" covering
+roughly 40m with entirely smooth, legitimate-looking kinematics (matching
+every other check's own blind spot exactly), then genuine sailing
+resuming for well over a minute. With the check enabled, the drift-back
+correctly fails warm-up throughout, and the next accepted run only starts
+once the debt is actually paid off, deep into the genuine sailing that
+follows — with the check disabled, the drift-back gets silently absorbed
+into one continuous run starting right at the gap's own far edge,
+reproducing the original failure exactly. Re-verified after each
+retuning, and the next accepted run's own start moved accordingly each
+time, exactly as the ratio predicts: index 84 at `0.5` (2×), 76 at `0.8`
+(1.25×), 78 at `0.67` (~1.5×) — monotonic with strictness, and the
+drift-back itself never qualified at any of the three settings, before or
+after the payback-eligibility fix. The double-gap correction case:
+comparing the original and corrected payback rules directly against the
+same synthetic double-gap track, the corrected rule accepted the next
+genuine run starting at index 68, while the uncorrected rule delayed it
+to index 95 — the exact "losing whole runs to an inflated debt" failure
+this fix targets, reproduced and resolved side by side on the same data.
 
 ### Reconnection: revisiting walk-back breaks once the full picture is known
 
@@ -1606,11 +1719,12 @@ Saves the current (post-editing) points as standard GPX 1.1, preserving
 | Control | Default | Meaning |
 |---|---|---|
 | run breaks if \|curvature\| ≥ | `0.15` /m | hard vertex-check threshold (§4 step 4/5), fit-based |
-| heading swings ≥ (wide angle) anywhere in the run | `120°` | range-based extension tolerance, edge-based |
+| heading swings ≥ (wide angle) anywhere in the run | `90°` | range-based extension tolerance, edge-based |
 | speed ≤ | `0.3` m/s | low-speed edge failure, fit-based |
 | tangential accel deviates (fit vs edge) ≥ | `5` m/s² | the other hard vertex-check threshold (§4 step 4/5, §7) |
 | warm-up/trailing vertices need fit centripetal accel < | `1.2` m/s² | §4's warm-up/warm-down-only check — never checked during extension |
-| warm-up/trailing edges need \|fit − device speed\| < | `5` m/s | §4's warm-up/warm-down-only check — only when device speed is present in the file |
+| warm-up/trailing edges need \|fit − device speed\| < | `2` m/s | §4's warm-up/warm-down-only check — toggleable (`runDeviceSpeedDeviationEnabled`), only when device speed is present in the file |
+| gap debt payback weight | `0.67` | §4's warm-up-only check — toggleable (`runGapDebtEnabled`); doesn't depend on device speed being present |
 | warm-up validated at ≥ (narrow angle) | `10°` | warm-up + trailing-straightness tolerance, edge-based |
 | warm-up/trailing window needs ≥ | `2` edges | minimum edge count — both must be satisfied, not either alone |
 | warm-up/trailing window needs ≥ | `2` s | minimum duration — same accumulation logic used forward (warm-up) and backward (trailing) |
