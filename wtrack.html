@@ -181,7 +181,7 @@
       <div class="row thresh">
         <label style="color:var(--good);">edge checks (anywhere in a run):</label>
         <label>run breaks if speed &le; <input type="number" id="runLowSpeedThresh" value="0.3" step="0.1" min="0"> m/s</label>
-        <label>or accumulated heading swings &ge; <input type="number" id="runBreakHeadingThresh" value="120" step="1" min="0"> &deg; (wide angle) anywhere in the run</label>
+        <label>or accumulated heading swings &ge; <input type="number" id="runBreakHeadingThresh" value="90" step="1" min="0"> &deg; (wide angle) anywhere in the run</label>
       </div>
       <div class="row thresh">
         <label style="color:var(--good);">warm-up / trailing straightness only:</label>
@@ -189,7 +189,12 @@
         <label>and &ge; <input type="number" id="runMinSec" value="2" step="1" min="0"> s (covers variable-dt tracks with few samples per second)</label>
         <label>heading range within the window &lt; <input type="number" id="runNarrowHeadingThresh" value="10" step="1" min="0"> &deg; (narrow angle)</label>
         <label>every vertex needs fit centripetal accel &lt; <input type="number" id="runWarmupCentripetalAccelThresh" value="1.2" step="0.1" min="0"> m/s&sup2;</label>
-        <label>every edge needs |fit &minus; device speed| &lt; <input type="number" id="runWarmupDeviceSpeedDeviationThresh" value="2" step="0.5" min="0"> m/s (only if device speed is present)</label>
+        <label><input type="checkbox" id="runDeviceSpeedDeviationEnabled" checked> every edge needs |fit &minus; device speed| &lt; <input type="number" id="runWarmupDeviceSpeedDeviationThresh" value="2" step="0.5" min="0"> m/s (only if device speed is present)</label>
+      </div>
+      <div class="row thresh">
+        <label style="color:var(--good);">warm-up only:</label>
+        <label><input type="checkbox" id="runGapDebtEnabled" checked> gap debt: distance traveled since the last gap must pay off that gap's own jump distance</label>
+        <label>payback weight <input type="number" id="runGapDebtPaybackWeight" value="0.67" step="0.05" min="0" max="1"> (each metre of non-gap travel credits this fraction of a metre toward paying off a gap)</label>
       </div>
       <div class="row thresh">
         <label style="color:var(--good);">run acceptance:</label>
@@ -555,6 +560,9 @@
   const runAccelDeviationThreshInput = el('runAccelDeviationThresh');
   const runWarmupCentripetalAccelThreshInput = el('runWarmupCentripetalAccelThresh');
   const runWarmupDeviceSpeedDeviationThreshInput = el('runWarmupDeviceSpeedDeviationThresh');
+  const runDeviceSpeedDeviationEnabledInput = el('runDeviceSpeedDeviationEnabled');
+  const runGapDebtEnabledInput = el('runGapDebtEnabled');
+  const runGapDebtPaybackWeightInput = el('runGapDebtPaybackWeight');
   const fitNumPointsInput = el('fitNumPoints');
   const fitDegreeInput = el('fitDegree');
   const speedLagAccelThreshInput = el('speedLagAccelThresh');
@@ -585,6 +593,12 @@
       dedupeTimestamps();
       if(points.length < 3) throw new Error('Need at least 3 points with distinct timestamps');
       computeDerived();
+      // Gap debt (§4) exists specifically as a fallback for tracks
+      // without device speed — device-speed deviation is the more direct
+      // check when a device speed reading is actually present, so
+      // default gap debt on only when this track doesn't have one.
+      // hasDeviceSpeed is already computed above, inside computeDerived.
+      runGapDebtEnabledInput.checked = !hasDeviceSpeed;
       selected = firstValid;
       fullTRange = { tMin: points[firstValid].t, tMax: points[lastValid].t };
       timeView = { tMin: fullTRange.tMin, tMax: fullTRange.tMax };
@@ -1482,7 +1496,73 @@
     const accelDevT = parseFloat(runAccelDeviationThreshInput.value);
     const warmupCentripetalAccelT = parseFloat(runWarmupCentripetalAccelThreshInput.value);
     const warmupDeviceSpeedDeviationT = parseFloat(runWarmupDeviceSpeedDeviationThreshInput.value);
+    const deviceSpeedDeviationEnabled = runDeviceSpeedDeviationEnabledInput.checked;
+    const gapDebtEnabled = runGapDebtEnabledInput.checked;
+    const gapDebtPaybackWeight = parseFloat(runGapDebtPaybackWeightInput.value) || 0;
     const minEdges = parseInt(runMinEdgesInput.value, 10) || 1;
+
+    // Gap debt: a warm-up-only check, precomputed once for the whole
+    // track as a sequential running accumulator — same "computed once,
+    // consumed as a local lookup" pattern headingUnwrapped (§3) uses,
+    // for the same reason: the thing being tracked is inherently
+    // cumulative, not a per-point property.
+    //
+    // Motivated by the same real failure mode deviceSpeedDeviationFails
+    // was added for (a gap that jumps the recorded position far away,
+    // then the GPS "corrects" itself by gradually drifting the reported
+    // position back toward the true one over the following points,
+    // producing a synthetic path that reads as kinematically legitimate)
+    // — but without relying on device speed being present in the file at
+    // all. A gap edge encountered while the debt is already clear
+    // starts a new debt cycle, ADDING its own jump distance (the
+    // straight-line distance between its two endpoints); every OTHER
+    // edge while a debt is outstanding — gap or not — counts as a
+    // PAYBACK edge, crediting only gapDebtPaybackWeight (default 0.67)
+    // of its own distance — so it takes genuinely traveling roughly
+    // 1/gapDebtPaybackWeight times a gap's own jump distance to fully
+    // net it out, not just matching it edge-for-edge.
+    //
+    // Treating every edge after the first gap as payback — not just
+    // non-gap edges — was a deliberate fix for a real failure this
+    // surfaced on an actual track: two gaps close together, where the
+    // second one's own jump happens to land back toward the true
+    // position (a large course/position correction, not a further
+    // departure). The original version added BOTH gaps' distances
+    // together regardless of direction, since it only ever checked
+    // "is this edge a gap" to decide whether to add — a second,
+    // correcting gap ballooned the debt instead of reducing it, and cost
+    // two entire genuine runs before the inflated debt could ever
+    // clear. Confirmed directly: a synthetic two-gap case (80m then a
+    // 75m "correction") showed the debt swelling to 155m under the old
+    // rule but dropping to under 30m under this one, after the same two
+    // edges. A "path home" drift-back is exactly the case the asymmetry
+    // still targets even under the new rule: the drift itself only
+    // covers something on the order of the gap's own jump distance
+    // before rejoining the true track, which nets out to a still-
+    // substantial remaining debt rather than clearing it — a genuine
+    // run, unrelated to the gap, keeps accumulating real distance well
+    // past that. The debt clamps at zero rather than going negative —
+    // a run's own genuine distance doesn't bank "credit" against a
+    // future gap; each gap's debt is paid off only by distance traveled
+    // after it. warmupOk requires every vertex in the window to have
+    // already netted its own debt to zero — a vertex still carrying
+    // unpaid debt hasn't traveled far enough past its most recent gap to
+    // be trusted as a genuine run start yet.
+    const gapDebt = gapDebtEnabled ? new Float64Array(points.length) : null;
+    if(gapDebtEnabled){
+      let debt = 0;
+      for(let i=1;i<points.length;i++){
+        const dx = points[i].x-points[i-1].x, dy = points[i].y-points[i-1].y;
+        const edgeDist = Math.hypot(dx, dy);
+        if(debt <= 1e-9 && edgeGapFails(i)) debt += edgeDist;
+        else debt = Math.max(0, debt - gapDebtPaybackWeight*edgeDist);
+        gapDebt[i] = debt;
+      }
+    }
+    function gapDebtFails(i){
+      if(!gapDebtEnabled || !gapDebt) return false;
+      return gapDebt[i] > 1e-6; // small epsilon against accumulated float error, not a real tolerance
+    }
 
     // A straight-line-corridor check (fits a line through the window's own
     // points, flags a point straying too far perpendicular to it) lived
@@ -1587,6 +1667,7 @@
     // don't have it, and this check is a no-op rather than a failure
     // when it's missing, same as everywhere else device speed gets used.
     function deviceSpeedDeviationFails(i){
+      if(!deviceSpeedDeviationEnabled) return false;
       const p = points[i];
       if(!p || p.rawSpeed == null || Number.isNaN(p.rawSpeed)) return false; // no device speed here — undefined ≠ failure
       const f = fitDerived[i];
@@ -1700,6 +1781,22 @@
       let endFailReason = null;
       for(let j=breakPoint;j<=e;j++){
         if(curvatureFails(j) || tanAccelDeviationFails(j) || fitCentripetalAccelFails(j) || deviceSpeedDeviationFails(j)){ warmupOk = false; break; }
+      }
+      if(!warmupOk){ breakPoint++; continue; }
+
+      // Gap debt — warm-up ONLY, deliberately not trailing straightness
+      // too (unlike the three checks just above): a "path home" drift-
+      // back artifact is, by construction, only ever encountered right
+      // after a gap, which is exactly where a NEW run's own warm-up
+      // starts — a run's own tail (trailing straightness) can't be
+      // immediately after a gap in the same way, since a gap edge would
+      // already have excluded itself from extension via edgeFails long
+      // before reaching the tail. See gapDebt's own comment above for
+      // the full mechanism.
+      if(warmupOk){
+        for(let j=breakPoint;j<=e;j++){
+          if(gapDebtFails(j)){ warmupOk = false; break; }
+        }
       }
       if(!warmupOk){ breakPoint++; continue; }
 
@@ -2913,7 +3010,7 @@
     if(timeView.tMin < fullTRange.tMin){ timeView.tMin = fullTRange.tMin; timeView.tMax = timeView.tMin + span; }
     if(timeView.tMax > fullTRange.tMax){ timeView.tMax = fullTRange.tMax; timeView.tMin = timeView.tMax - span; }
   }
-  [runCurvThreshInput, runBreakHeadingThreshInput, runNarrowHeadingThreshInput, runMinEdgesInput, runMinSecInput, runMinDurationInput, runLowSpeedThreshInput, runAccelDeviationThreshInput, runWarmupCentripetalAccelThreshInput, runWarmupDeviceSpeedDeviationThreshInput, reconnectEnabledInput, looseTackMaxDurationInput, looseTackMaxStallTimeInput, speedLagAccelThreshInput].forEach(inp=>{
+  [runCurvThreshInput, runBreakHeadingThreshInput, runNarrowHeadingThreshInput, runMinEdgesInput, runMinSecInput, runMinDurationInput, runLowSpeedThreshInput, runAccelDeviationThreshInput, runWarmupCentripetalAccelThreshInput, runWarmupDeviceSpeedDeviationThreshInput, runDeviceSpeedDeviationEnabledInput, runGapDebtEnabledInput, runGapDebtPaybackWeightInput, reconnectEnabledInput, looseTackMaxDurationInput, looseTackMaxStallTimeInput, speedLagAccelThreshInput].forEach(inp=>{
     inp.addEventListener('input', ()=>{ redrawAll(); });
   });
   // Separate from the loop above: these two affect fitDerived itself
