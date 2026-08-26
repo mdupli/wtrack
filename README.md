@@ -92,16 +92,26 @@ Some devices (adaptive/smart recording) legitimately log at more than one
 rate — `baseDtMs` alone can't distinguish "this device normally logs at
 several different intervals" from "this specific gap is a real dropout."
 
-At load time, every distinct positive `dt` value is counted. `dtMaxVar` is
-the **highest** `dt` that still appears in **at least 10% of all
-intervals** — the upper edge of what this device's normal variable sampling
-looks like. If no other `dt` value qualifies (a normal fixed-rate track),
-`dtMaxVar` simply equals `baseDtMs`.
+At load time, every positive `dt` is collected and sorted; `dtMaxVar` is
+the value at the **95th percentile** of that sorted list — the upper edge
+of what this device's normal variable sampling looks like. If there are
+no positive `dt` values at all, `dtMaxVar` simply equals `baseDtMs`.
 
 ```
-dtMaxVar = max( dt : count(dt) >= 0.10 * totalIntervals )
-         = baseDtMs   if nothing else qualifies
+sorted = sort( dt : dt > 0, over all consecutive raw timestamp pairs )
+dtMaxVar = sorted[ floor(0.95 * length(sorted)) ]
+         = baseDtMs   if sorted is empty
 ```
+
+Percentile-based, not mode-based — replaced an earlier version that took
+the highest `dt` value appearing in at least 10% of all intervals. That
+approach depended on some specific `dt` value repeating often enough to
+form a clear mode, which a highly variable device might never produce (no
+single interval common enough to clear the 10% bar) — leaving `dtMaxVar`
+stuck at `baseDtMs` and flagging most of the track as gaps. A percentile
+doesn't need any value to repeat at all; it only needs the distribution's
+overall shape, so it degrades gracefully regardless of how scattered the
+device's own variable rate turns out to be.
 
 This feeds directly into run detection (§4) as the boundary between "normal
 sampling" and a "true gap."
@@ -110,7 +120,7 @@ sampling" and a "true gap."
 
 For points **A, B, C** (three consecutive points), with edges `AB` and `BC`:
 
-### Velocity — attributed to the edge's endpoint
+### Raw edge kinematics — attributed to the edge's endpoint
 
 ```
 velocity(B) = (B - A) / (t_B - t_A)     — "the speed getting here"
@@ -125,6 +135,38 @@ velocity is exactly its own trailing edge, so there's no smoothing lag.
 `uniformSampling(i)` = does the single interval feeding this point's
 velocity equal `baseDtMs`. (Used elsewhere for diagnostics; not gated in
 run detection — see §4.)
+
+**Jerk** — the rate of change of *acceleration* — follows this same
+edge-endpoint attribution, not acceleration/curvature's vertex attribution
+below, even though it's derived from acceleration: for edge `BC`
+specifically, jerk describes how much acceleration changed *across* that
+edge, a property of the edge itself, so it's stored at `derived[i+1]` (the
+edge's own ending index) — exactly the same convention `speed(i)` already
+uses for `edge(i-1,i)`.
+
+```
+jerk(BC) = ( accel(C) - accel(B) ) / dt(BC)
+```
+
+Computed as the raw `(ax, ay)` **vector** difference first, then projected
+once onto edge `BC`'s own velocity — not a scalar difference of the two
+already-projected `tanAccel` values, since those were each projected onto
+a *different* basis (accel(B) onto the average of velocity(B)/velocity(C);
+accel(C) onto the average of velocity(C)/velocity(D)), so a plain scalar
+subtraction would compare two numbers computed against two slightly
+different tangent directions. Confirmed the difference is real, not
+academic: a synthetic turning-and-accelerating case gave `-0.50` via the
+naive scalar-difference shortcut versus `-1.50` via projecting the
+difference vector once — the naive version was silently cancelling real
+signal against the basis mismatch.
+
+Not read by any run-detection check anymore — tried there in two
+different forms and removed both times (too noisy in practice, and
+separately unable to reliably locate its original motivating target, a
+jibe's true exit — see §4's edge-check section for the full story). Kept
+purely for its own kinematics-chart plots, alongside a smoothed, fit-based
+version (§7) — genuinely useful to look at even though neither drives an
+automatic decision.
 
 ### Acceleration/curvature — attributed to the point *between* the samples
 
@@ -191,10 +233,13 @@ by any of this — it's still exactly `velocity(B)`, unchanged.
 |---|---|---|
 | `velocity`, `heading` | index 1 … n−1 | needs one point before |
 | `acceleration`, `curvature` | index 1 … n−2 | needs a point on **each** side |
+| `jerk` | index 2 … n−2 | needs acceleration on **each side** of the edge it's attributed to |
 
 The true track start (index 0) never has any derived data. The true track
 end (index n−1) has velocity/heading but no acceleration/curvature (no
-point after it to complete the window).
+point after it to complete the window) — and jerk's own range is narrower
+still, since it's a difference of two already-computed accelerations,
+each of which already needs a point on either side.
 
 ## 4. Run detection
 
@@ -502,7 +547,7 @@ Two angle thresholds do different jobs:
 8. Track end can be reached either mid-run or between runs — no special
    handling needed; the loop just stops.
 
-### The warm-up/warm-down-only check
+### The warm-up/warm-down-only checks
 
 **Fit centripetal acceleration** (`runWarmupCentripetalAccelThresh`,
 default `1.2 m/s²`) is checked only during warm-up (step 4) and trailing
@@ -534,6 +579,42 @@ that this genuinely narrows both ends symmetrically, not just the tail:
 before this check existed, warm-up-side vertices commonly measured
 similarly elevated values (some over 1.5 m/s²); after, both a run's
 `startIdx` and `endIdx` consistently read well under the threshold.
+
+**Device-speed deviation** (`runWarmupDeviceSpeedDeviationThresh`,
+default `5 m/s`) is scoped identically — warm-up and trailing straightness
+only, never extension — but exists for an entirely different reason: it's
+the one check in this whole state machine that reads something *outside*
+this app's own kinematics entirely. `|fitDerived[i].speed −
+points[i].rawSpeed| ≥` threshold, checked only where a device speed
+reading is actually present in the file (a no-op, not a failure, when
+it's missing — most tracks don't have one at all).
+
+Motivated by a specific, real failure mode none of the kinematics-based
+checks can see: a gap that jumps the recorded position far away, then the
+GPS "corrects" itself by gradually drifting the reported position back
+toward the true one over the following points. That drift is a synthetic
+path — nothing about it happened in the real world — but because the
+drift itself is gradual by construction, it can look entirely legitimate
+under every check above: smooth heading, reasonable curvature, no sharp
+spike anywhere for the vertex checks to catch, no gap for the edge check
+to catch (the *drift* isn't a gap, only the initial jump was, and that
+jump already happened before this stretch begins). Confirmed on a real
+track with exactly this failure mode: the fake "path home" after a gap
+passed as a normal, valid run under every existing check, and only
+comparing against the device's own independently-measured speed (from its
+own GPS chipset, not derived from this app's position-to-position
+calculation) exposed it — the device wasn't fooled by a synthetic
+position drift the way a purely position-derived speed estimate is.
+
+This is a narrower return of an idea tried and removed once already:
+device-speed disagreement used to be a general edge-level run-detection
+check (§4's edge-check section has that history) and was dropped once the
+low-speed and curvature/heading checks already covered what it used to
+catch. That removal still holds for the general case — this is a
+deliberately different, much narrower reintroduction, scoped specifically
+to warm-up/warm-down (not every edge in a run) and motivated by a
+concrete failure case the other checks provably can't see, not a return
+to the original general-purpose version.
 
 ### Reconnection: revisiting walk-back breaks once the full picture is known
 
@@ -628,15 +709,21 @@ the run) if:
 
 Device-speed disagreement used to be a third edge-check criterion here,
 but turned out unnecessary for run detection specifically once the two
-checks above already existed — dropped from this list entirely (it's now
-used only by the speed-gradient map coloring, an unrelated, purely
-cosmetic concern — see §11's track color modes discussion). A fit-based
-`|tangentialJerk|` edge check (replacing an even earlier vertex-level
-fit-accel-magnitude attempt) was also tried here and removed — not a
-data-quality problem this time, a real-world discrimination failure: too
-noisy in practice even on genuinely straight-ish segments to set a useful
-threshold, and separately unhelpful for its original motivating purpose
-(locating a jibe's true exit) since exit jerk tends to be low anyway.
+checks above already existed — dropped from this list entirely. It also
+used to be the exclusion criterion for the speed-gradient map coloring, a
+separate, purely cosmetic concern — also dropped from there once a
+second, independent speed estimate existed for every edge regardless (the
+local path fit — §7), and superseded again since: gradient exclusion now
+inherits directly from the classification pipeline itself (which edges
+are part of a run or a classified transition) rather than maintaining any
+device-speed logic of its own — see §11's track color modes discussion.
+A fit-based `|tangentialJerk|` edge check (replacing an even earlier
+vertex-level fit-accel-magnitude attempt) was also tried here and
+removed — not a data-quality problem this time, a real-world
+discrimination failure: too noisy in practice even on genuinely
+straight-ish segments to set a useful threshold, and separately
+unhelpful for its original motivating purpose (locating a jibe's true
+exit) since exit jerk tends to be low anyway.
 Both jerk kinematics (§3's edge-based version, §7's smoothed fit-based
 one) and their kinematics-chart plots stay — genuinely useful to look at,
 just not usable as an automatic pass/fail gate here.
@@ -1523,6 +1610,7 @@ Saves the current (post-editing) points as standard GPX 1.1, preserving
 | speed ≤ | `0.3` m/s | low-speed edge failure, fit-based |
 | tangential accel deviates (fit vs edge) ≥ | `5` m/s² | the other hard vertex-check threshold (§4 step 4/5, §7) |
 | warm-up/trailing vertices need fit centripetal accel < | `1.2` m/s² | §4's warm-up/warm-down-only check — never checked during extension |
+| warm-up/trailing edges need \|fit − device speed\| < | `5` m/s | §4's warm-up/warm-down-only check — only when device speed is present in the file |
 | warm-up validated at ≥ (narrow angle) | `10°` | warm-up + trailing-straightness tolerance, edge-based |
 | warm-up/trailing window needs ≥ | `2` edges | minimum edge count — both must be satisfied, not either alone |
 | warm-up/trailing window needs ≥ | `2` s | minimum duration — same accumulation logic used forward (warm-up) and backward (trailing) |
@@ -1714,7 +1802,14 @@ clamped or otherwise confusing position.
 
 Below the canvas, a text readout shows the selected point's speed and its
 heading relative to wind (`angleDiff180`, 0°–180°, same convention as the
-full rose's own off-wind labels — see §5). The two are grouped in one
+full rose's own off-wind labels — see §5). Speed prefers `fitDerived`'s
+own smoothed value (`preferFitSpeed`, shared with the selection info box
+below and the speed-gradient map coloring — see "Track color modes"),
+falling back to `derived`'s raw edge speed only in the rare case
+`fitDerived` isn't available at that point (a narrower valid range than
+`derived`'s — right at the very edges of the track, see §7); heading
+stays edge-based regardless (§4's own heading-reversion story). The two
+are grouped in one
 positioned wrapper (`#miniRoseWrapper`) so they move together, but the
 wrapper's own bounding box is *not* what gets centered on the followed
 point — that would include the readout's height below the canvas and
@@ -1764,37 +1859,61 @@ mode switch, not an overlay, so the maneuver-type distinction is
 deliberately traded away in favor of a speed-focused view for as long as
 the mode is active.
 
-"Eligible" excludes, regardless of mode:
+"Eligible" excludes, regardless of mode — `edgeGradientExcluded`, which
+now inherits its criteria from the classification pipeline itself (§4/§6)
+rather than maintaining its own separate notion of "good enough to
+color":
 
 - A true dt gap (`edgeGapFails`) — the derived speed there is a
   gap-spanning average, not a real instantaneous reading.
-- A derived/device speed disagreement (`runDeviceDisagreeThresh`, default
-  `5 m/s`) — its own, gradient-only threshold now; no longer tied to run
-  detection at all (§4 dropped this criterion there once the vertex-level
-  checks already covered the same real problems without needing device
-  speed to be present).
-- A `crash_recovery` zone specifically — real motion, but not ordinary
-  sailing speed.
-- Anything outside any run or transition entirely (unclassified) —
-  handled for free, since excluded edges simply aren't drawn over,
-  leaving the grey base path visible underneath rather than needing an
-  explicit grey re-draw.
+- Anything not part of a run, and not part of a classified transition
+  segment other than `crash_recovery` — a successful or failed jibe/tack
+  still reflects genuine sailing and stays eligible, but `crash_recovery`
+  is known-bad data by definition, and anything that fell through
+  classification entirely (no wind direction set yet, or the transition
+  zone matched no jibe/tack/crash pattern at all) has no basis for trust
+  either. Handled for free either way, since excluded edges simply aren't
+  drawn over, leaving the grey base path visible underneath rather than
+  needing an explicit grey re-draw.
 
-The gradient's min/max range is computed from the **local path fit's**
-speed (§7) at each eligible point, not the raw edge speed — the fit is a
-second, independent speed estimate that naturally smooths out an isolated
-glitched edge, so one bad point can't drag the whole color scale's bounds
-along with it, without needing an external device reading (which isn't
-always present anyway) to provide that protection. Individual edges are
-still colored by their own actual (raw) derived speed, mapped into this
-fit-derived range — only the range's bounds come from the fit, so the
-displayed gradient still reflects real edge-to-edge variation rather than
-a smoothed-over version of it. The track legend (toggleable, same
+No separate device-speed check here anymore, even where device speed is
+present in the file — an earlier version had its own, gradient-only
+device-speed-disagreement threshold, dropped once a second, independent
+speed estimate already existed for every edge regardless (the local path
+fit — §7), and superseded again since: inheriting from run detection
+picks up its own device-speed check (§4) automatically wherever that
+governs, without this needing any device-speed logic of its own.
+
+The gradient's min/max range, and now every individual edge's own color
+within it, both read the **local path fit's** speed (§7), not the raw
+edge speed — a deliberate change from an earlier version where only the
+range came from the fit and each edge's own color still came from the
+raw, edge-based reading. The fit is a second, independent speed estimate
+that naturally smooths out an isolated glitched edge, so one bad point
+can't drag the whole color scale's bounds along with it, without needing
+an external device reading (which isn't always present anyway) to
+provide that protection — and reading it consistently for the edge color
+too, not just the range, keeps a single glitched point from painting
+itself with a wildly different color than its genuinely similar-speed
+neighbors. The track legend (toggleable, same
 panel) rebuilds itself per mode — type mode shows the usual swatches;
 speed mode shows a single gradient bar sampled directly from the same
 `speedToColor` function used for the actual edges (not a separately
 duplicated color formula, so the two can't drift apart), labeled with the
 range's min/max in the current display unit.
+
+`preferFitSpeed(i, edgeSpeed)` — the same fit-speed-with-edge-fallback
+helper this gradient uses — is shared by two other UI surfaces too: the
+mini compass overlay's own selected-point readout (above), and every
+speed figure in the selection info box (run max speed; jibe/tack entry,
+exit, through-the-wind, min, and max speed; crash/recovery's pre-crash
+speed). All three switched together, for the same reason: a second,
+independent speed estimate exists for every edge regardless of whether
+device speed happens to be present, and prefers it consistently rather
+than mixing sources depending on which UI element happens to be showing
+it. Heading stays edge-based at every one of these same call sites
+(§4's own heading-reversion story) — this only ever touches the speed
+side of a lookup, never heading.
 
 ### Speed display unit
 
