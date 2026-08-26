@@ -189,6 +189,7 @@
         <label>and &ge; <input type="number" id="runMinSec" value="2" step="1" min="0"> s (covers variable-dt tracks with few samples per second)</label>
         <label>heading range within the window &lt; <input type="number" id="runNarrowHeadingThresh" value="10" step="1" min="0"> &deg; (narrow angle)</label>
         <label>every vertex needs fit centripetal accel &lt; <input type="number" id="runWarmupCentripetalAccelThresh" value="1.2" step="0.1" min="0"> m/s&sup2;</label>
+        <label>every edge needs |fit &minus; device speed| &lt; <input type="number" id="runWarmupDeviceSpeedDeviationThresh" value="2" step="0.5" min="0"> m/s (only if device speed is present)</label>
       </div>
       <div class="row thresh">
         <label style="color:var(--good);">run acceptance:</label>
@@ -322,7 +323,7 @@
   let lastLoadedText = null;                          // raw GPX text, cached so we can restore after deleting points
   let lastLoadedFilename = null;                       // source filename, used to derive the export filename
   let baseDtMs = null;                                 // detected sampling interval (ms), min dt across the originally loaded track
-  let dtMaxVar = null;                                  // highest dt (ms) still common enough (>=10% of intervals) to be normal variable-rate sampling, not a true gap
+  let dtMaxVar = null;                                  // highest dt (ms) at the 95th percentile of positive intervals — see parseGPX
 
   const el = id => document.getElementById(id);
   const fileInput = el('fileInput');
@@ -553,6 +554,7 @@
   const runLowSpeedThreshInput = el('runLowSpeedThresh');
   const runAccelDeviationThreshInput = el('runAccelDeviationThresh');
   const runWarmupCentripetalAccelThreshInput = el('runWarmupCentripetalAccelThresh');
+  const runWarmupDeviceSpeedDeviationThreshInput = el('runWarmupDeviceSpeedDeviationThresh');
   const fitNumPointsInput = el('fitNumPoints');
   const fitDegreeInput = el('fitDegree');
   const speedLagAccelThreshInput = el('speedLagAccelThresh');
@@ -1479,6 +1481,7 @@
     const lowSpeedT = parseFloat(runLowSpeedThreshInput.value);
     const accelDevT = parseFloat(runAccelDeviationThreshInput.value);
     const warmupCentripetalAccelT = parseFloat(runWarmupCentripetalAccelThreshInput.value);
+    const warmupDeviceSpeedDeviationT = parseFloat(runWarmupDeviceSpeedDeviationThreshInput.value);
     const minEdges = parseInt(runMinEdgesInput.value, 10) || 1;
 
     // A straight-line-corridor check (fits a line through the window's own
@@ -1549,13 +1552,13 @@
     // get positioned once something else has ALREADY decided a break
     // belongs there. That distinction matters for exactly the case this
     // is meant to catch: a walk-back-terminated run's own last vertex is,
-    // by construction, wherever curvature peaked — so it's often still
-    // carrying real centripetal acceleration even though it already
-    // passed the narrow-angle/curvature/corridor checks (confirmed
-    // against a real track: many walk-back run endpoints measured
-    // 2-4 m/s² of fit centripetal acceleration right at runEnd, well
-    // over this threshold, even though everything else about that vertex
-    // already looked acceptable). This check exists to catch that
+    // by construction, wherever fit centripetal acceleration peaked — so
+    // it's often still carrying real centripetal acceleration even
+    // though it already passed the narrow-angle/curvature checks
+    // (confirmed against a real track: many walk-back run endpoints
+    // measured 2-4 m/s² of fit centripetal acceleration right at runEnd,
+    // well over this threshold, even though everything else about that
+    // vertex already looked acceptable). This check exists to catch that
     // specifically and pull the boundary back a little further, past the
     // peak itself, to wherever the fit's own curve has genuinely settled
     // — not to decide whether a break happens at all.
@@ -1563,6 +1566,32 @@
       const f = fitDerived[i];
       if(!f || f.centripetalAccel == null) return false; // undefined ≠ failure
       return Math.abs(f.centripetalAccel) >= warmupCentripetalAccelT;
+    }
+    // Same warm-up/warm-down-only scoping as the check above, for a
+    // similar underlying reason: this catches something the kinematics
+    // alone can't. A gap that jumps far away and is then "corrected"
+    // by the GPS gradually drifting the reported position back toward
+    // the true one over the following points produces a synthetic path
+    // that can look entirely legitimate kinematically — smooth heading,
+    // reasonable curvature, no sharp spikes anywhere, since the drift
+    // itself is gradual by construction. None of the other warm-up/
+    // warm-down checks are built to catch this, because there's nothing
+    // locally sharp for them to catch. But the device's own independent
+    // speed reading (from its own GPS chipset, not derived from this
+    // app's own position-to-position calculation) isn't fooled by a
+    // synthetic drift-back — confirmed against a real track with exactly
+    // this failure mode, where a fake "path home" after a gap read as a
+    // normal, valid run under every kinematics-based check, and only
+    // comparing against device speed exposed it. Only ever runs when
+    // device speed is actually present in the file at all — most tracks
+    // don't have it, and this check is a no-op rather than a failure
+    // when it's missing, same as everywhere else device speed gets used.
+    function deviceSpeedDeviationFails(i){
+      const p = points[i];
+      if(!p || p.rawSpeed == null || Number.isNaN(p.rawSpeed)) return false; // no device speed here — undefined ≠ failure
+      const f = fitDerived[i];
+      if(!f || f.speed == null) return false;
+      return Math.abs(f.speed - p.rawSpeed) >= warmupDeviceSpeedDeviationT;
     }
     // Edge-level check: too slow to still be "sailing," or the edge spans
     // a true gap (wider than dtMaxVar — beyond what this device's normal
@@ -1670,7 +1699,7 @@
       // now, so the extension step below (gated on it) always runs.
       let endFailReason = null;
       for(let j=breakPoint;j<=e;j++){
-        if(curvatureFails(j) || tanAccelDeviationFails(j) || fitCentripetalAccelFails(j)){ warmupOk = false; break; }
+        if(curvatureFails(j) || tanAccelDeviationFails(j) || fitCentripetalAccelFails(j) || deviceSpeedDeviationFails(j)){ warmupOk = false; break; }
       }
       if(!warmupOk){ breakPoint++; continue; }
 
@@ -1804,6 +1833,7 @@
             if((tailMax - tailMin) >= narrowT){ tailOk = false; break; }
           }
           if(fitCentripetalAccelFails(j)){ tailOk = false; break; }
+          if(deviceSpeedDeviationFails(j)){ tailOk = false; break; }
         }
         if(tailOk && tailMax === -Infinity) tailOk = false; // no valid heading data in the window at all
         if(tailOk) break;
@@ -2883,7 +2913,7 @@
     if(timeView.tMin < fullTRange.tMin){ timeView.tMin = fullTRange.tMin; timeView.tMax = timeView.tMin + span; }
     if(timeView.tMax > fullTRange.tMax){ timeView.tMax = fullTRange.tMax; timeView.tMin = timeView.tMax - span; }
   }
-  [runCurvThreshInput, runBreakHeadingThreshInput, runNarrowHeadingThreshInput, runMinEdgesInput, runMinSecInput, runMinDurationInput, runLowSpeedThreshInput, runAccelDeviationThreshInput, runWarmupCentripetalAccelThreshInput, reconnectEnabledInput, looseTackMaxDurationInput, looseTackMaxStallTimeInput, speedLagAccelThreshInput].forEach(inp=>{
+  [runCurvThreshInput, runBreakHeadingThreshInput, runNarrowHeadingThreshInput, runMinEdgesInput, runMinSecInput, runMinDurationInput, runLowSpeedThreshInput, runAccelDeviationThreshInput, runWarmupCentripetalAccelThreshInput, runWarmupDeviceSpeedDeviationThreshInput, reconnectEnabledInput, looseTackMaxDurationInput, looseTackMaxStallTimeInput, speedLagAccelThreshInput].forEach(inp=>{
     inp.addEventListener('input', ()=>{ redrawAll(); });
   });
   // Separate from the loop above: these two affect fitDerived itself
@@ -3207,18 +3237,32 @@
     alert(`Removed ${flagged.length} flagged point(s): ${beforeCount} \u2192 ${points.length} points. Use "restore original track" to compare against the unfiltered kinematics.`);
   }
 
-  // Only a true gap excludes an edge now — device-speed disagreement used
-  // to also exclude here, but now that a second, independent speed
-  // estimate exists for every edge (the local path fit — §7), that's a
-  // better reference than an external device reading that isn't always
-  // present anyway: see the min/max range computation below, which uses
-  // the fit's own speed rather than a device-disagreement exclusion to
-  // keep a single glitched edge from skewing the color scale.
+  // Inherits trustworthiness from the classification pipeline (§4/§6)
+  // rather than maintaining a second, separate notion of "good enough to
+  // color" here. An edge counts as trustworthy if it's part of a run, or
+  // part of ANY classified transition segment EXCEPT crash_recovery —
+  // a successful or failed jibe/tack still reflects genuine sailing, just
+  // not steady-state, so it stays included; crash_recovery is known-bad
+  // data by definition, and anything that fell through classification
+  // entirely (no wind direction set yet, or the transition zone matched
+  // no jibe/tack/crash pattern at all) has no basis for trust either —
+  // both get excluded now, where only a true gap used to. A side benefit
+  // of inheriting rather than re-deriving: this automatically picks up
+  // run detection's own device-speed check (§4) too, at whatever edges
+  // that governs, without needing its own separate device-speed
+  // comparison here — no longer needed even where device speed IS
+  // present, since a second, independent speed estimate already exists
+  // for every edge regardless (the local path fit — §7).
   function edgeGradientExcluded(i){
     const d = derived[i];
     if(!d) return true;
+    if(!fitDerived[i] || fitDerived[i].speed == null) return true; // gradient color itself now reads fit speed
     if(edgeGapFails(i)) return true;
-    return false;
+    const inRun = currentRuns.some(r => i > r.startIdx && i <= r.endIdx);
+    if(inRun) return false;
+    const inClassifiedTransition = currentTransitions.some(t =>
+      t.type !== 'crash_recovery' && i > t.transitionStart && i <= t.transitionEnd);
+    return !inClassifiedTransition;
   }
   function speedToColor(speed, minSpeed, maxSpeed){
     const t = maxSpeed > minSpeed ? Math.max(0, Math.min(1, (speed-minSpeed)/(maxSpeed-minSpeed))) : 0.5;
@@ -3332,7 +3376,7 @@
       currentRuns.forEach(run=>{
         for(let i=run.startIdx+1;i<=run.endIdx;i++){
           if(edgeGradientExcluded(i)) continue; // leave the grey base path showing through
-          ctx.strokeStyle = speedToColor(derived[i].speed, speedMin, speedMax);
+          ctx.strokeStyle = speedToColor(fitDerived[i].speed, speedMin, speedMax);
           ctx.beginPath();
           ctx.moveTo(sx(points[i-1].x), sy(points[i-1].y));
           ctx.lineTo(sx(points[i].x), sy(points[i].y));
@@ -3375,7 +3419,7 @@
         ctx.lineWidth = 3;
         for(let i=tr.transitionStart+1;i<=endIdx;i++){
           if(edgeGradientExcluded(i)) continue;
-          ctx.strokeStyle = speedToColor(derived[i].speed, speedMin, speedMax);
+          ctx.strokeStyle = speedToColor(fitDerived[i].speed, speedMin, speedMax);
           ctx.beginPath();
           ctx.moveTo(sx(points[i-1].x), sy(points[i-1].y));
           ctx.lineTo(sx(points[i].x), sy(points[i].y));
@@ -3486,7 +3530,7 @@
       // duplicating the hue formula separately and risking the two drifting apart
       const stops = [0,0.25,0.5,0.75,1].map(t => speedToColor(min + t*(max-min), min, max)).join(', ');
       trackLegend.innerHTML = `
-        <span><span class="sw" style="background:#3a4552"></span>excluded (gap / speed disagreement / crash / unclassified)</span>
+        <span><span class="sw" style="background:#3a4552"></span>excluded (gap / crash / unclassified)</span>
         <span style="display:inline-flex; align-items:center; gap:6px;">
           <span>${formatSpeed(min)}</span>
           <span style="width:120px; height:10px; border-radius:3px; display:inline-block; background:linear-gradient(to right, ${stops});"></span>
@@ -3604,10 +3648,12 @@
     // labels — 0° means heading exactly along the wind axis, upwind or
     // downwind; 180° means heading exactly the opposite way along it).
     // derived[] can be null right at the very first/last point of the
-    // track (outside firstValid..lastValid), so guard for that.
+    // track (outside firstValid..lastValid), so guard for that. Speed
+    // prefers fitDerived's own smoothed value (preferFitSpeed); heading
+    // stays edge-based regardless (see §4's own heading-reversion story).
     const d = derived[selected];
     if(d){
-      const speedText = formatSpeed(d.speed);
+      const speedText = formatSpeed(preferFitSpeed(selected, d.speed));
       const windText = manualDir != null ? angleDiff180(d.heading, manualDir).toFixed(0) + '° off wind' : '';
       miniRoseReadout.textContent = windText ? `${speedText} · ${windText}` : speedText;
     } else {
@@ -3666,6 +3712,19 @@
 
   // Stats for a segment, scoped to exactly the fields each type actually
   // needs — see updateSelectionInfoBox for which fields each type reads.
+  // Prefer fitDerived's own smoothed speed at index i, falling back to
+  // derived's raw edge speed only in the rare case fitDerived isn't
+  // available there (a narrower valid range than derived's — right at
+  // the very edges of the track, see §7). Shared by the compass readout,
+  // the gradient's own per-edge coloring, and every speed figure in the
+  // selection info box below — heading stays edge-based throughout these
+  // same call sites regardless (see §4's own heading-reversion story),
+  // so this only ever touches the speed side of any given lookup.
+  function preferFitSpeed(i, edgeSpeed){
+    const f = fitDerived[i];
+    return (f && f.speed != null) ? f.speed : edgeSpeed;
+  }
+
   function computeSegmentStats(seg, windAxis){
     const { type, startIdx, endIdx } = seg;
     const duration = points[endIdx].t - points[startIdx].t;
@@ -3696,7 +3755,8 @@
       for(let i=startIdx+1;i<=endIdx;i++){
         const d = derived[i];
         if(!d) continue;
-        if(d.speed > maxSpeed){ maxSpeed = d.speed; maxSpeedIdx = i; }
+        const sp = preferFitSpeed(i, d.speed);
+        if(sp > maxSpeed){ maxSpeed = sp; maxSpeedIdx = i; }
         if(windAxis != null){
           const ow = angleDiff180(d.heading, windAxis);
           if(ow < offWindMin) offWindMin = ow;
@@ -3712,9 +3772,9 @@
     if(type === 'jibe' || type === 'tack' || type === 'failed_jibe' || type === 'failed_tack'){
       const entryD = derived[startIdx+1];
       const exitD = derived[endIdx];
-      stats.entrySpeed = entryD ? entryD.speed : null;
+      stats.entrySpeed = entryD ? preferFitSpeed(startIdx+1, entryD.speed) : null;
       stats.entryOffWind = (entryD && windAxis != null) ? angleDiff180(entryD.heading, windAxis) : null;
-      stats.exitSpeed = exitD ? exitD.speed : null;
+      stats.exitSpeed = exitD ? preferFitSpeed(endIdx, exitD.speed) : null;
       stats.exitOffWind = (exitD && windAxis != null) ? angleDiff180(exitD.heading, windAxis) : null;
 
       // "Through" the wind — the last vertex still on the original side,
@@ -3724,7 +3784,7 @@
       // computeTransitions rather than re-derived here. null for a failed
       // attempt that broke off before ever actually swinging past its pole.
       const throughD = seg.throughIdx != null ? derived[seg.throughIdx] : null;
-      stats.throughSpeed = throughD ? throughD.speed : null;
+      stats.throughSpeed = throughD ? preferFitSpeed(seg.throughIdx, throughD.speed) : null;
       stats.throughOffWind = (throughD && windAxis != null) ? angleDiff180(throughD.heading, windAxis) : null;
 
       let minSpeed = Infinity, minSpeedIdx = null;
@@ -3732,8 +3792,9 @@
       for(let i=startIdx+1;i<=endIdx;i++){
         const d = derived[i];
         if(!d) continue;
-        if(d.speed < minSpeed){ minSpeed = d.speed; minSpeedIdx = i; }
-        if(d.speed > maxSpeed){ maxSpeed = d.speed; maxSpeedIdx = i; }
+        const sp = preferFitSpeed(i, d.speed);
+        if(sp < minSpeed){ minSpeed = sp; minSpeedIdx = i; }
+        if(sp > maxSpeed){ maxSpeed = sp; maxSpeedIdx = i; }
       }
       stats.minSpeed = minSpeedIdx != null ? minSpeed : null;
       stats.minSpeedOffWind = (minSpeedIdx != null && windAxis != null) ? angleDiff180(derived[minSpeedIdx].heading, windAxis) : null;
@@ -3748,7 +3809,7 @@
       // transitionStart (derived[startIdx]) is the last normal edge
       // before the gap begins.
       const preCrashD = derived[startIdx];
-      stats.preCrashSpeed = preCrashD ? preCrashD.speed : null;
+      stats.preCrashSpeed = preCrashD ? preferFitSpeed(startIdx, preCrashD.speed) : null;
       stats.preCrashOffWind = (preCrashD && windAxis != null) ? angleDiff180(preCrashD.heading, windAxis) : null;
     }
 
